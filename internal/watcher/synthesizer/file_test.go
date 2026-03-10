@@ -2,9 +2,11 @@ package synthesizer
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,26 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+func testJWTWithPlanType(t *testing.T, planType string) string {
+	t.Helper()
+
+	header, err := json.Marshal(map[string]any{"alg": "none", "typ": "JWT"})
+	if err != nil {
+		t.Fatalf("marshal jwt header: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type": planType,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal jwt payload: %v", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(header) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + "."
+}
 
 func TestNewFileSynthesizer(t *testing.T) {
 	synth := NewFileSynthesizer()
@@ -259,6 +281,83 @@ func (f multiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthParseReque
 
 func (f multiAuthParserFunc) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
 	return f(ctx, req)
+}
+
+func TestSynthesizeAuthFile_CodexPlanTypeResolution(t *testing.T) {
+	tempDir := t.TempDir()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	testCases := []struct {
+		name     string
+		metadata map[string]any
+		want     string
+	}{
+		{
+			name: "file override wins over jwt",
+			metadata: map[string]any{
+				"type":      "codex",
+				"email":     "test@example.com",
+				"plan_type": " Plus ",
+				"id_token":  testJWTWithPlanType(t, "team"),
+			},
+			want: "plus",
+		},
+		{
+			name: "jwt used when file plan missing",
+			metadata: map[string]any{
+				"type":     "codex",
+				"email":    "test@example.com",
+				"id_token": testJWTWithPlanType(t, "team"),
+			},
+			want: "team",
+		},
+		{
+			name: "invalid file plan falls back to jwt",
+			metadata: map[string]any{
+				"type":      "codex",
+				"email":     "test@example.com",
+				"plan_type": "enterprise",
+				"id_token":  testJWTWithPlanType(t, "free"),
+			},
+			want: "free",
+		},
+		{
+			name: "invalid file plan without jwt leaves unset",
+			metadata: map[string]any{
+				"type":      "codex",
+				"email":     "test@example.com",
+				"plan_type": "enterprise",
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.metadata)
+			if err != nil {
+				t.Fatalf("marshal auth data: %v", err)
+			}
+
+			auths := SynthesizeAuthFile(ctx, filepath.Join(tempDir, strings.ReplaceAll(tt.name, " ", "-")+".json"), data)
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			got := ""
+			if auths[0].Attributes != nil {
+				got = auths[0].Attributes["plan_type"]
+			}
+			if got != tt.want {
+				t.Fatalf("plan_type = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {

@@ -514,6 +514,11 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if !auth.NextRetryAfter.IsZero() {
 		entry["next_retry_after"] = auth.NextRetryAfter
 	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if planType := strings.TrimSpace(authAttribute(auth, "plan_type")); planType != "" {
+			entry["plan_type"] = planType
+		}
+	}
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
@@ -950,14 +955,14 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 			dst = abs
 		}
 	}
-	auth, err := h.buildAuthFromFileData(dst, data)
+	auths, err := h.buildAuthsFromFileData(dst, data)
 	if err != nil {
 		return err
 	}
 	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
-	if err := h.upsertAuthRecord(ctx, auth); err != nil {
+	if err := h.upsertAuthRecords(ctx, auths); err != nil {
 		return err
 	}
 	return nil
@@ -1139,14 +1144,14 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	if h.authManager == nil {
 		return nil
 	}
-	auth, err := h.buildAuthFromFileData(path, data)
+	auths, err := h.buildAuthsFromFileData(path, data)
 	if err != nil {
 		return err
 	}
-	return h.upsertAuthRecord(ctx, auth)
+	return h.upsertAuthRecords(ctx, auths)
 }
 
-func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, error) {
+func (h *Handler) buildAuthsFromFileData(path string, data []byte) ([]*coreauth.Auth, error) {
 	if path == "" {
 		return nil, fmt.Errorf("auth path is empty")
 	}
@@ -1161,77 +1166,57 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
-	provider, _ := metadata["type"].(string)
-	if provider == "" {
-		provider = "unknown"
-	}
-	label := provider
-	if email, ok := metadata["email"].(string); ok && email != "" {
-		label = email
-	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
+	sctx := &synthesizer.SynthesisContext{
+		Config:      h.cfg,
+		AuthDir:     h.cfg.AuthDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+	auths := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	if len(auths) == 0 {
+		return nil, fmt.Errorf("invalid auth file: unsupported or empty auth payload")
+	}
 
-	authID := h.authIDForPath(path)
-	if authID == "" {
-		authID = path
-	}
-	auth := (*coreauth.Auth)(nil)
-	if h != nil && h.cfg != nil {
-		sctx := &synthesizer.SynthesisContext{
-			Config:      h.cfg,
-			AuthDir:     h.cfg.AuthDir,
-			Now:         time.Now(),
-			IDGenerator: synthesizer.NewStableIDGenerator(),
+	for _, auth := range auths {
+		if auth == nil {
+			continue
 		}
-		if generated := synthesizer.SynthesizeAuthFile(sctx, path, data); len(generated) > 0 && generated[0] != nil {
-			auth = generated[0].Clone()
+		if strings.TrimSpace(auth.FileName) == "" {
+			auth.FileName = filepath.Base(path)
+		}
+		if hasLastRefresh {
+			auth.LastRefreshedAt = lastRefresh
 		}
 	}
-	if auth == nil {
-		auth = &coreauth.Auth{
-			ID:       authID,
-			Provider: provider,
-			Label:    label,
-			Status:   coreauth.StatusActive,
-			Attributes: map[string]string{
-				"path":   path,
-				"source": path,
-			},
-			Metadata:  metadata,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
+	return auths, nil
+}
+
+func (h *Handler) upsertAuthRecords(ctx context.Context, auths []*coreauth.Auth) error {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
 		}
-	}
-	auth.ID = authID
-	auth.FileName = filepath.Base(path)
-	if hasLastRefresh {
-		auth.LastRefreshedAt = lastRefresh
-	}
-	if h != nil && h.authManager != nil {
-		if existing, ok := h.authManager.GetByID(authID); ok {
+		if existing, ok := h.authManager.GetByID(auth.ID); ok {
 			auth.CreatedAt = existing.CreatedAt
-			if !hasLastRefresh {
+			if auth.LastRefreshedAt.IsZero() {
 				auth.LastRefreshedAt = existing.LastRefreshedAt
 			}
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			auth.Runtime = existing.Runtime
+			if _, err := h.authManager.Update(ctx, auth); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := h.authManager.Register(ctx, auth); err != nil {
+			return err
 		}
 	}
-	coreauth.ApplyCustomHeadersFromMetadata(auth)
-	return auth, nil
-}
-
-func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {
-	if h == nil || h.authManager == nil || auth == nil {
-		return nil
-	}
-	if existing, ok := h.authManager.GetByID(auth.ID); ok {
-		auth.CreatedAt = existing.CreatedAt
-		_, err := h.authManager.Update(ctx, auth)
-		return err
-	}
-	_, err := h.authManager.Register(ctx, auth)
-	return err
+	return nil
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
