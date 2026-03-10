@@ -159,14 +159,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
-	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
-		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
-			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
-				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
-					a.Attributes["plan_type"] = pt
-				}
-			}
+		if planType := codex.ResolvePlanTypeFromMetadata(metadata); planType != "" {
+			a.Attributes["plan_type"] = planType
 		}
 	}
 	if provider == "gemini-cli" {

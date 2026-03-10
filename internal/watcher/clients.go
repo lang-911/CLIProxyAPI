@@ -161,7 +161,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	curHash := hex.EncodeToString(sum[:])
 	normalized := w.normalizeAuthPath(path)
 
-	// Parse new auth content for diff comparison
+	// Parse new auth content for cache/debug purposes.
 	var newAuth coreauth.Auth
 	if errParse := json.Unmarshal(data, &newAuth); errParse != nil {
 		log.Errorf("failed to parse auth file %s: %v", filepath.Base(path), errParse)
@@ -199,7 +199,6 @@ func (w *Watcher) addOrUpdateClient(path string) {
 			}
 		}
 	}
-
 	// Update caches
 	w.lastAuthHashes[normalized] = curHash
 	if cacheAuthContents {
@@ -223,6 +222,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
+	logAuthFieldChanges(path, oldByID, newByID)
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
@@ -233,6 +233,26 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 	w.dispatchAuthUpdates(updates)
+}
+
+func logAuthFieldChanges(path string, oldByID, newByID map[string]*coreauth.Auth) {
+	ids := make(map[string]struct{}, len(oldByID)+len(newByID))
+	for id := range oldByID {
+		ids[id] = struct{}{}
+	}
+	for id := range newByID {
+		ids[id] = struct{}{}
+	}
+	for id := range ids {
+		changes := diff.BuildAuthChangeDetails(oldByID[id], newByID[id])
+		if len(changes) == 0 {
+			continue
+		}
+		log.Debugf("auth field changes for %s [%s]:", filepath.Base(path), id)
+		for _, c := range changes {
+			log.Debugf("  %s", c)
+		}
+	}
 }
 
 func (w *Watcher) removeClient(path string) {
