@@ -1603,10 +1603,10 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	if ginHeaders != nil && ginHeaders.Get("X-Codex-Beta-Features") != "" {
 		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
+	cfgUserAgent, _, cfgOriginator, cfgVersion := codexHeaderDefaults(cfg, auth)
+	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "Version", cfgVersion, codexClientVersion)
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
@@ -1626,12 +1626,8 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 			isAPIKey = true
 		}
 	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		r.Header.Set("Originator", originator)
-	} else if !isAPIKey {
-		r.Header.Set("Originator", codexOriginator)
-	}
 	if !isAPIKey {
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "Originator", cfgOriginator, codexOriginator)
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				r.Header.Set("Chatgpt-Account-Id", accountID)

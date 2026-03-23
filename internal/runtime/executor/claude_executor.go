@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -283,7 +284,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, baseModel, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return resp, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -469,7 +470,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, baseModel, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
 		return nil, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -725,7 +726,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, baseModel, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -1020,7 +1021,12 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
+func claudeModelSupports1MContext(baseModel string) bool {
+	modelInfo := registry.LookupModelInfo(strings.TrimSpace(baseModel), "claude")
+	return modelInfo != nil && modelInfo.ContextLength >= 1_000_000
+}
+
+func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
 	if r == nil {
 		return nil
 	}
@@ -1071,8 +1077,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		baseBetas += ",interleaved-thinking-2025-05-14"
 	}
 
+	enableClaude1MBeta := false
+	if ginHeaders != nil {
+		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
+			enableClaude1MBeta = claudeModelSupports1MContext(baseModel)
+		}
+	}
+
 	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 {
+	if len(extraBetas) > 0 || enableClaude1MBeta {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
@@ -1087,6 +1100,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				existingSet[beta] = true
 			}
 		}
+		if enableClaude1MBeta && !existingSet["context-1m-2025-08-07"] {
+			baseBetas += ",context-1m-2025-08-07"
+		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
@@ -1096,7 +1112,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.76 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -1887,6 +1903,12 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	// scope='org' in the API request. Only scope='global' is sent explicitly.
 	// The system prompt prefix block is sent without cache_control.
 	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
+	if strictMode {
+		systemResult := "[" + billingBlock + "," + agentBlock + "]"
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
+		return payload
+	}
+
 	staticPrompt := strings.Join([]string{
 		helps.ClaudeCodeIntro,
 		helps.ClaudeCodeSystem,
