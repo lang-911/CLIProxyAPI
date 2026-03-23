@@ -15,7 +15,8 @@ const (
 	GeminiCLIVersion = "0.34.0"
 
 	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
-	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+	// x-goog-api-client: gl-node/22.17.1
+	GeminiCLIApiClientHeader = "gl-node/22.17.1"
 )
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
