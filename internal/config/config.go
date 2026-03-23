@@ -156,10 +156,13 @@ type ClaudeHeaderDefaults struct {
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
-// model requests for OAuth/file-backed auth when the client omits them.
-// UserAgent applies to HTTP and websocket requests; BetaFeatures only applies to websockets.
+// model requests for OAuth/file-backed auth.
+// UserAgent applies only to HTTP requests; Originator and Version apply to HTTP and
+// websocket requests; BetaFeatures only applies to websockets.
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
+	Originator   string `yaml:"originator" json:"originator"`
+	Version      string `yaml:"version" json:"version"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
@@ -780,6 +783,8 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 		return
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+	cfg.CodexHeaderDefaults.Originator = strings.TrimSpace(cfg.CodexHeaderDefaults.Originator)
+	cfg.CodexHeaderDefaults.Version = strings.TrimSpace(cfg.CodexHeaderDefaults.Version)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 

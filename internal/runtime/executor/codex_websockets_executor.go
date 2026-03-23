@@ -812,6 +812,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if headers == nil {
 		headers = http.Header{}
 	}
+	headers.Del("User-Agent")
 	if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
@@ -821,14 +822,13 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
-	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
+	_, cfgBetaFeatures, cfgOriginator, cfgVersion := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
-	misc.EnsureHeader(headers, ginHeaders, "Version", "")
-
+	ensureHeaderWithConfigPrecedence(headers, ginHeaders, "Version", cfgVersion, codexClientVersion)
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
 	if betaHeader == "" && ginHeaders != nil {
 		betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
@@ -837,10 +837,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-	}
-	headers.Del("User-Agent")
+	misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
@@ -848,12 +845,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 			isAPIKey = true
 		}
 	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginator)
-	}
 	if !isAPIKey {
+		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "Originator", cfgOriginator, codexOriginator)
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
@@ -868,20 +861,24 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	headers.Del("User-Agent")
 
 	return headers
 }
 
-func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
+func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string, string, string) {
 	if cfg == nil || auth == nil {
-		return "", ""
+		return "", "", "", ""
 	}
 	if auth.Attributes != nil {
 		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			return "", ""
+			return "", "", "", ""
 		}
 	}
-	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent),
+		strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures),
+		strings.TrimSpace(cfg.CodexHeaderDefaults.Originator),
+		strings.TrimSpace(cfg.CodexHeaderDefaults.Version)
 }
 
 func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {

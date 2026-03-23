@@ -86,3 +86,51 @@ func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {
 		}
 	}
 }
+
+func TestCodexTiersIncludeGPT54Mini(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		models []*ModelInfo
+	}{
+		{name: "free", models: GetCodexFreeModels()},
+		{name: "team", models: GetCodexTeamModels()},
+		{name: "plus", models: GetCodexPlusModels()},
+		{name: "pro", models: GetCodexProModels()},
+	}
+
+	for _, tt := range testCases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var found *ModelInfo
+			for _, model := range tt.models {
+				if model != nil && model.ID == "gpt-5.4-mini" {
+					found = model
+					break
+				}
+			}
+
+			if found == nil {
+				t.Fatalf("expected gpt-5.4-mini in codex-%s catalog", tt.name)
+			}
+			if found.DisplayName != "GPT-5.4-Mini" {
+				t.Fatalf("display name = %q, want %q", found.DisplayName, "GPT-5.4-Mini")
+			}
+			if found.Version != "gpt-5.4-mini" {
+				t.Fatalf("version = %q, want %q", found.Version, "gpt-5.4-mini")
+			}
+			if found.ContextLength != 400000 {
+				t.Fatalf("context_length = %d, want %d", found.ContextLength, 400000)
+			}
+			if found.MaxCompletionTokens != 128000 {
+				t.Fatalf("max_completion_tokens = %d, want %d", found.MaxCompletionTokens, 128000)
+			}
+			if found.Thinking == nil || len(found.Thinking.Levels) != 4 {
+				t.Fatalf("unexpected thinking levels: %+v", found.Thinking)
+			}
+		})
+	}
+}

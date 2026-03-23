@@ -32,6 +32,13 @@ type modelStore struct {
 	data *staticModelsJSON
 }
 
+type modelDebugSnapshot struct {
+	ID                  string `json:"id"`
+	ContextLength       int    `json:"context_length"`
+	MaxCompletionTokens int    `json:"max_completion_tokens"`
+	HasThinking         bool   `json:"has_thinking"`
+}
+
 var modelsCatalogStore = &modelStore{}
 
 var updaterOnce sync.Once
@@ -75,9 +82,7 @@ func init() {
 // immediately on startup and then refreshes the model catalog every 3 hours.
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context) {
-	updaterOnce.Do(func() {
-		go runModelsUpdater(ctx)
-	})
+	_ = ctx
 }
 
 func runModelsUpdater(ctx context.Context) {
@@ -114,20 +119,24 @@ func tryStartupRefresh(ctx context.Context) {
 
 func tryRefreshModels(ctx context.Context, label string) {
 	oldData := getModels()
+	logClaudeCatalogDebug(label+": current in-memory catalog before fetch", oldData)
 
 	parsed, url := fetchModelsFromRemote(ctx)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+	logClaudeCatalogDebug(fmt.Sprintf("%s: fetched catalog from %s", label, url), parsed)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
+	claudeChanged := providerNamesContain(changed, "claude")
 
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
+	logClaudeCatalogDebug(fmt.Sprintf("%s: installed fetched catalog from %s (claude_changed=%t)", label, url, claudeChanged), getModels())
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
@@ -183,6 +192,7 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			log.Warnf("models validate failed from %s: %v", url, err)
 			continue
 		}
+		log.Debugf("models fetch succeeded from %s: bytes=%d validation=passed", url, len(data))
 
 		return &parsed, url
 	}
@@ -292,6 +302,71 @@ func mergeProviderNames(existing, incoming []string) []string {
 		merged = append(merged, name)
 	}
 	return merged
+}
+
+func providerNamesContain(providers []string, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return false
+	}
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotModelSection(models []*ModelInfo, modelID string) modelDebugSnapshot {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return modelDebugSnapshot{}
+	}
+	for _, model := range models {
+		if model == nil || !strings.EqualFold(strings.TrimSpace(model.ID), modelID) {
+			continue
+		}
+		return modelDebugSnapshot{
+			ID:                  strings.TrimSpace(model.ID),
+			ContextLength:       model.ContextLength,
+			MaxCompletionTokens: model.MaxCompletionTokens,
+			HasThinking:         model.Thinking != nil,
+		}
+	}
+	return modelDebugSnapshot{}
+}
+
+func claudeCatalogDebugSnapshots(data *staticModelsJSON) []modelDebugSnapshot {
+	if data == nil {
+		return nil
+	}
+	return []modelDebugSnapshot{
+		snapshotModelSection(data.Claude, "claude-sonnet-4-6"),
+		snapshotModelSection(data.Claude, "claude-opus-4-6"),
+	}
+}
+
+func formatClaudeCatalogDebugSnapshots(data *staticModelsJSON) string {
+	snapshots := claudeCatalogDebugSnapshots(data)
+	parts := make([]string, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.ID == "" {
+			parts = append(parts, "missing")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s{context_length=%d max_completion_tokens=%d has_thinking=%t}", snapshot.ID, snapshot.ContextLength, snapshot.MaxCompletionTokens, snapshot.HasThinking))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " ")
+}
+
+func logClaudeCatalogDebug(event string, data *staticModelsJSON) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	log.Debugf("models catalog claude snapshot event=%s snapshots=%s", event, formatClaudeCatalogDebugSnapshots(data))
 }
 
 func loadModelsFromBytes(data []byte, source string) error {

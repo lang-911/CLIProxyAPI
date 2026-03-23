@@ -210,7 +210,7 @@ nonstream-keepalive-interval: 0
 # while user-agent/package-version/runtime-version seed a software fingerprint that can
 # still upgrade to newer official Claude client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
+#   user-agent: "claude-cli/2.1.76 (external, sdk-cli)"
 #   package-version: "0.74.0"
 #   runtime-version: "v24.3.0"
 #   os: "MacOS"
@@ -220,10 +220,13 @@ nonstream-keepalive-interval: 0
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
-# does not send the header. `user-agent` applies to HTTP and websocket requests;
+# does not send the header. `user-agent` applies only to HTTP requests;
+# `originator` and `version` apply to HTTP and websocket requests;
 # `beta-features` only applies to websocket requests. They do not apply to codex-api-key entries.
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
+#   originator: "codex_cli_rs"
+#   version: "0.114.0"
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers
