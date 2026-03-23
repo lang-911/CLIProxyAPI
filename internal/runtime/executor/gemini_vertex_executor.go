@@ -29,6 +29,8 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+var vertexAmbientAccessTokenFunc = vertexauth.AmbientAccessToken
+
 const (
 	// vertexAPIVersion aligns with current public Vertex Generative AI API.
 	vertexAPIVersion = "v1"
@@ -176,6 +178,8 @@ type GeminiVertexExecutor struct {
 	cfg *config.Config
 }
 
+type vertexBearerTokenFunc func(context.Context) (string, error)
+
 // NewGeminiVertexExecutor creates a new Vertex AI Gemini executor instance.
 //
 // Parameters:
@@ -199,6 +203,18 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("x-goog-api-key", apiKey)
 		req.Header.Del("Authorization")
+		return nil
+	}
+	if isAmbientVertexAuth(auth) {
+		token, errToken := vertexAmbientAccessTokenFunc(req.Context())
+		if errToken != nil {
+			return errToken
+		}
+		if strings.TrimSpace(token) == "" {
+			return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Del("x-goog-api-key")
 		return nil
 	}
 	_, _, saJSON, errCreds := vertexCreds(auth)
@@ -243,6 +259,13 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	// If no API key found, fall back to service account authentication
 	if apiKey == "" {
+		if isAmbientVertexAuth(auth) {
+			projectID, location, errAmbient := vertexAmbientCreds(auth)
+			if errAmbient != nil {
+				return resp, errAmbient
+			}
+			return e.executeWithAmbientCredentials(ctx, auth, req, opts, projectID, location)
+		}
 		projectID, location, saJSON, errCreds := vertexCreds(auth)
 		if errCreds != nil {
 			return resp, errCreds
@@ -264,6 +287,13 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// If no API key found, fall back to service account authentication
 	if apiKey == "" {
+		if isAmbientVertexAuth(auth) {
+			projectID, location, errAmbient := vertexAmbientCreds(auth)
+			if errAmbient != nil {
+				return nil, errAmbient
+			}
+			return e.executeStreamWithAmbientCredentials(ctx, auth, req, opts, projectID, location)
+		}
 		projectID, location, saJSON, errCreds := vertexCreds(auth)
 		if errCreds != nil {
 			return nil, errCreds
@@ -282,6 +312,13 @@ func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	// If no API key found, fall back to service account authentication
 	if apiKey == "" {
+		if isAmbientVertexAuth(auth) {
+			projectID, location, errAmbient := vertexAmbientCreds(auth)
+			if errAmbient != nil {
+				return cliproxyexecutor.Response{}, errAmbient
+			}
+			return e.countTokensWithAmbientCredentials(ctx, auth, req, opts, projectID, location)
+		}
 		projectID, location, saJSON, errCreds := vertexCreds(auth)
 		if errCreds != nil {
 			return cliproxyexecutor.Response{}, errCreds
@@ -298,9 +335,7 @@ func (e *GeminiVertexExecutor) Refresh(_ context.Context, auth *cliproxyauth.Aut
 	return auth, nil
 }
 
-// executeWithServiceAccount handles authentication using service account credentials.
-// This method contains the original service account authentication logic.
-func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (resp cliproxyexecutor.Response, err error) {
+func (e *GeminiVertexExecutor) executeWithBearerToken(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, tokenFunc vertexBearerTokenFunc) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -357,11 +392,13 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token, errTok := tokenFunc(ctx); errTok == nil && token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return resp, statusErr{code: 500, msg: "internal server error"}
+	} else {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var attrs map[string]string
@@ -428,6 +465,17 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+// executeWithServiceAccount handles authentication using service account credentials.
+func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (cliproxyexecutor.Response, error) {
+	return e.executeWithBearerToken(ctx, auth, req, opts, projectID, location, func(ctx context.Context) (string, error) {
+		return vertexAccessToken(ctx, e.cfg, auth, saJSON)
+	})
+}
+
+func (e *GeminiVertexExecutor) executeWithAmbientCredentials(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string) (cliproxyexecutor.Response, error) {
+	return e.executeWithBearerToken(ctx, auth, req, opts, projectID, location, vertexAmbientAccessTokenFunc)
 }
 
 // executeWithAPIKey handles authentication using API key credentials.
@@ -540,8 +588,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	return resp, nil
 }
 
-// executeStreamWithServiceAccount handles streaming authentication using service account credentials.
-func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (_ *cliproxyexecutor.StreamResult, err error) {
+func (e *GeminiVertexExecutor) executeStreamWithBearerToken(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, tokenFunc vertexBearerTokenFunc) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -586,11 +633,13 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token, errTok := tokenFunc(ctx); errTok == nil && token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return nil, statusErr{code: 500, msg: "internal server error"}
+	} else {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var attrs map[string]string
@@ -667,6 +716,17 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// executeStreamWithServiceAccount handles streaming authentication using service account credentials.
+func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (*cliproxyexecutor.StreamResult, error) {
+	return e.executeStreamWithBearerToken(ctx, auth, req, opts, projectID, location, func(ctx context.Context) (string, error) {
+		return vertexAccessToken(ctx, e.cfg, auth, saJSON)
+	})
+}
+
+func (e *GeminiVertexExecutor) executeStreamWithAmbientCredentials(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string) (*cliproxyexecutor.StreamResult, error) {
+	return e.executeStreamWithBearerToken(ctx, auth, req, opts, projectID, location, vertexAmbientAccessTokenFunc)
 }
 
 // executeStreamWithAPIKey handles streaming authentication using API key credentials.
@@ -798,8 +858,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
-// countTokensWithServiceAccount counts tokens using service account credentials.
-func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (cliproxyexecutor.Response, error) {
+func (e *GeminiVertexExecutor) countTokensWithBearerToken(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, tokenFunc vertexBearerTokenFunc) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
@@ -827,11 +886,13 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		return cliproxyexecutor.Response{}, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token, errTok := tokenFunc(ctx); errTok == nil && token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return cliproxyexecutor.Response{}, statusErr{code: 500, msg: "internal server error"}
+	} else {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var attrs map[string]string
@@ -885,6 +946,17 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
 	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+}
+
+// countTokensWithServiceAccount counts tokens using service account credentials.
+func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (cliproxyexecutor.Response, error) {
+	return e.countTokensWithBearerToken(ctx, auth, req, opts, projectID, location, func(ctx context.Context) (string, error) {
+		return vertexAccessToken(ctx, e.cfg, auth, saJSON)
+	})
+}
+
+func (e *GeminiVertexExecutor) countTokensWithAmbientCredentials(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string) (cliproxyexecutor.Response, error) {
+	return e.countTokensWithBearerToken(ctx, auth, req, opts, projectID, location, vertexAmbientAccessTokenFunc)
 }
 
 // countTokensWithAPIKey handles token counting using API key credentials.
@@ -1014,6 +1086,33 @@ func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccou
 		return "", "", nil, fmt.Errorf("vertex executor: marshal service_account failed: %w", errMarshal)
 	}
 	return projectID, location, saJSON, nil
+}
+
+func isAmbientVertexAuth(a *cliproxyauth.Auth) bool {
+	if a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "vertex") {
+		return false
+	}
+	return vertexauth.IsAmbientMetadata(a.Metadata)
+}
+
+func vertexAmbientCreds(a *cliproxyauth.Auth) (projectID, location string, err error) {
+	if a == nil || a.Metadata == nil {
+		return "", "", fmt.Errorf("vertex executor: missing auth metadata")
+	}
+	if !isAmbientVertexAuth(a) {
+		return "", "", fmt.Errorf("vertex executor: missing ambient credential marker")
+	}
+	if v, ok := a.Metadata["project_id"].(string); ok {
+		projectID = strings.TrimSpace(v)
+	}
+	if projectID == "" {
+		return "", "", fmt.Errorf("vertex executor: missing project_id in ambient credentials")
+	}
+	location = vertexauth.DefaultAmbientLocation
+	if v, ok := a.Metadata["location"].(string); ok && strings.TrimSpace(v) != "" {
+		location = strings.TrimSpace(v)
+	}
+	return projectID, location, nil
 }
 
 // vertexAPICreds extracts API key and base URL from auth attributes following the claudeCreds pattern.

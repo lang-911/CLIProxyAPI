@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	vertexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -89,6 +91,46 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+}
+
+const ambientVertexAuthID = "runtime:vertex:gce"
+
+var buildAmbientVertexRuntimeAuth = func(ctx context.Context) (*coreauth.Auth, error) {
+	ambient, err := vertexauth.DiscoverAmbientCredentials(ctx)
+	if err != nil || ambient == nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	label := strings.TrimSpace(ambient.Email)
+	if label == "" {
+		label = strings.TrimSpace(ambient.ProjectID)
+	}
+	if label == "" {
+		label = ambientVertexAuthID
+	}
+	metadata := map[string]any{
+		"type":              "vertex",
+		"project_id":        strings.TrimSpace(ambient.ProjectID),
+		"location":          strings.TrimSpace(ambient.Location),
+		"credential_source": vertexauth.AmbientCredentialSource,
+	}
+	if email := strings.TrimSpace(ambient.Email); email != "" {
+		metadata["email"] = email
+	}
+	return &coreauth.Auth{
+		ID:        ambientVertexAuthID,
+		Provider:  "vertex",
+		Label:     label,
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+			"auth_kind":    "oauth",
+			"source":       ambientVertexAuthID,
+		},
+		Metadata: metadata,
+	}, nil
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -198,6 +240,7 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	default:
 		log.Debugf("received unknown auth update action: %v", update.Action)
 	}
+	s.syncAmbientVertexAuth(ctx)
 }
 
 func (s *Service) ensureWebsocketGateway() {
@@ -268,6 +311,115 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 	s.emitAuthUpdate(ctx, watcher.AuthUpdate{
 		Action: watcher.AuthUpdateActionDelete,
 		ID:     channelID,
+	})
+}
+
+func isAmbientVertexAuth(auth *coreauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "vertex") {
+		return false
+	}
+	return vertexauth.IsAmbientMetadata(auth.Metadata)
+}
+
+func isExplicitVertexAuth(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Provider), "vertex") && !isAmbientVertexAuth(auth)
+}
+
+func ambientVertexAuthEqual(current, desired *coreauth.Auth) bool {
+	if current == nil || desired == nil {
+		return current == desired
+	}
+	return current.ID == desired.ID &&
+		current.Provider == desired.Provider &&
+		current.Prefix == desired.Prefix &&
+		current.ProxyURL == desired.ProxyURL &&
+		current.Label == desired.Label &&
+		current.Status == desired.Status &&
+		current.StatusMessage == desired.StatusMessage &&
+		current.Disabled == desired.Disabled &&
+		current.Unavailable == desired.Unavailable &&
+		reflect.DeepEqual(current.Attributes, desired.Attributes) &&
+		reflect.DeepEqual(current.Metadata, desired.Metadata)
+}
+
+func (s *Service) hasExplicitVertexAuth() bool {
+	if s == nil {
+		return false
+	}
+	if s.coreManager != nil {
+		for _, auth := range s.coreManager.List() {
+			if isExplicitVertexAuth(auth) {
+				return true
+			}
+		}
+	}
+	if s.watcher != nil {
+		for _, auth := range s.watcher.SnapshotAuths() {
+			if isExplicitVertexAuth(auth) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Service) removeAmbientVertexAuth(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	auth, ok := s.coreManager.GetByID(ambientVertexAuthID)
+	if !ok || !isAmbientVertexAuth(auth) || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return
+	}
+	s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionDelete,
+		ID:     ambientVertexAuthID,
+	})
+}
+
+func (s *Service) syncAmbientVertexAuth(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.hasExplicitVertexAuth() {
+		s.removeAmbientVertexAuth(ctx)
+		return
+	}
+	auth, err := buildAmbientVertexRuntimeAuth(ctx)
+	if err != nil {
+		log.Warnf("vertex ambient auth discovery failed: %v", err)
+		s.removeAmbientVertexAuth(ctx)
+		return
+	}
+	if auth == nil {
+		s.removeAmbientVertexAuth(ctx)
+		return
+	}
+	if current, ok := s.coreManager.GetByID(auth.ID); ok && current != nil {
+		auth.CreatedAt = current.CreatedAt
+		auth.LastRefreshedAt = current.LastRefreshedAt
+		auth.NextRefreshAfter = current.NextRefreshAfter
+		auth.NextRetryAfter = current.NextRetryAfter
+		if ambientVertexAuthEqual(current, auth) {
+			return
+		}
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     auth.ID,
+			Auth:   auth,
+		})
+		return
+	}
+	s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionAdd,
+		ID:     auth.ID,
+		Auth:   auth,
 	})
 }
 
@@ -686,6 +838,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
 		s.rebindExecutors()
+		s.syncAmbientVertexAuth(context.Background())
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -705,6 +858,7 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
 	log.Info("file watcher started for config and auth directory changes")
+	s.syncAmbientVertexAuth(context.Background())
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
