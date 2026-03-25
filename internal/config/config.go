@@ -113,6 +113,9 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// Claude configures provider-level behavior for Claude OAuth/file-backed auth.
+	Claude ClaudeProviderConfig `yaml:"claude" json:"claude"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -153,6 +156,14 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+// ClaudeProviderConfig configures provider-level behavior for Claude OAuth/file-backed auth.
+type ClaudeProviderConfig struct {
+	// BaseURL overrides the default Claude API endpoint for OAuth/file-backed auth.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	// DryRun skips upstream calls and returns synthetic success responses when enabled.
+	DryRun bool `yaml:"dry-run,omitempty" json:"dry-run,omitempty"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -687,6 +698,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
 
+	// Sanitize Claude provider config.
+	cfg.SanitizeClaudeProviderConfig()
+
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
@@ -800,6 +814,15 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+}
+
+// SanitizeClaudeProviderConfig trims surrounding whitespace from the provider-level
+// Claude OAuth/file-backed auth settings.
+func (cfg *Config) SanitizeClaudeProviderConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.Claude.BaseURL = strings.TrimSpace(cfg.Claude.BaseURL)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

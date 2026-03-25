@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -1007,6 +1008,138 @@ func TestClaudeExecutor_Claude1MHeaderUsesBaseModelAcrossPaths(t *testing.T) {
 				t.Fatalf("Anthropic-Beta = %q, want it to contain context-1m-2025-08-07", gotBeta)
 			}
 		})
+	}
+}
+
+func TestClaudeExecutor_DryRunNonStreamSkipsUpstreamAndIncludesHint(t *testing.T) {
+	var called bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-dry-run",
+			"base_url": server.URL,
+			"dry_run":  "true",
+		},
+	}
+	ctx := logging.WithRequestID(contextWithClaudeGinHeaders(nil), "req-dryrun-nonstream")
+
+	resp, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5-20250929",
+		Payload: []byte(`{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if called {
+		t.Fatal("expected dry-run to skip upstream call")
+	}
+	if got := resp.Headers.Get(claudeDryRunHeader); got != "true" {
+		t.Fatalf("%s = %q, want %q", claudeDryRunHeader, got, "true")
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); !strings.Contains(got, "request_id=req-dryrun-nonstream") {
+		t.Fatalf("content hint = %q, want request id", got)
+	}
+}
+
+func TestClaudeExecutor_DryRunStreamSkipsUpstreamAndIncludesHint(t *testing.T) {
+	var called bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-dry-run",
+			"base_url": server.URL,
+			"dry_run":  "true",
+		},
+	}
+	ctx := logging.WithRequestID(contextWithClaudeGinHeaders(nil), "req-dryrun-stream")
+
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5-20250929",
+		Payload: []byte(`{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if called {
+		t.Fatal("expected dry-run to skip upstream call")
+	}
+	if got := result.Headers.Get(claudeDryRunHeader); got != "true" {
+		t.Fatalf("%s = %q, want %q", claudeDryRunHeader, got, "true")
+	}
+
+	var chunks [][]byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		chunks = append(chunks, chunk.Payload)
+	}
+	streamPayload := string(bytes.Join(chunks, nil))
+	if !strings.Contains(streamPayload, "event: message_start") {
+		t.Fatalf("stream payload = %q, want message_start event", streamPayload)
+	}
+	if !strings.Contains(streamPayload, "request_id=req-dryrun-stream") {
+		t.Fatalf("stream payload = %q, want request id hint", streamPayload)
+	}
+}
+
+func TestClaudeExecutor_DryRunCountTokensSkipsUpstreamAndIncludesHint(t *testing.T) {
+	var called bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-dry-run",
+			"base_url": server.URL,
+			"dry_run":  "true",
+		},
+	}
+	ctx := logging.WithRequestID(contextWithClaudeGinHeaders(nil), "req-dryrun-count")
+
+	resp, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5-20250929",
+		Payload: []byte(`{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if called {
+		t.Fatal("expected dry-run to skip upstream call")
+	}
+	if got := resp.Headers.Get(claudeDryRunHeader); got != "true" {
+		t.Fatalf("%s = %q, want %q", claudeDryRunHeader, got, "true")
+	}
+	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got != 0 {
+		t.Fatalf("input_tokens = %d, want 0", got)
+	}
+	if !gjson.GetBytes(resp.Payload, "dry_run").Bool() {
+		t.Fatalf("dry_run = %v, want true", gjson.GetBytes(resp.Payload, "dry_run").Bool())
+	}
+	if got := gjson.GetBytes(resp.Payload, "dry_run_hint").String(); !strings.Contains(got, "request_id=req-dryrun-count") {
+		t.Fatalf("dry_run_hint = %q, want request id", got)
 	}
 }
 

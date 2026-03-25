@@ -20,10 +20,12 @@ import (
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -81,7 +83,10 @@ var oauthToolsToRemove = map[string]bool{}
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
-const defaultModelMaxTokens = 1024
+const (
+	claudeDryRunHeader    = "X-CPA-Dry-Run"
+	defaultModelMaxTokens = 1024
+)
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
@@ -135,10 +140,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -232,6 +234,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		AuthValue: authValue,
 	})
 
+	if dryRun {
+		return e.executeDryRun(ctx, req, opts, bodyForTranslation, baseModel, from, to)
+	}
+
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -322,10 +328,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -412,6 +415,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
+
+	if dryRun {
+		return e.executeDryRunStream(ctx, req, opts, bodyForTranslation, baseModel, from, to)
+	}
 
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -535,10 +542,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -589,6 +593,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
+
+	if dryRun {
+		return e.countTokensDryRun(ctx, req, opts, from, to)
+	}
 
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
@@ -643,6 +651,119 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
 	return cliproxyexecutor.Response{Payload: out, Headers: resp.Header.Clone()}, nil
+}
+
+func resolveClaudeExecutionSettings(auth *cliproxyauth.Auth) (apiKey, baseURL string, dryRun bool) {
+	apiKey, baseURL = claudeCreds(auth)
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	if auth != nil && auth.Attributes != nil {
+		dryRun = strings.EqualFold(strings.TrimSpace(auth.Attributes["dry_run"]), "true")
+	}
+	return apiKey, baseURL, dryRun
+}
+
+func claudeDryRunHint(ctx context.Context) string {
+	requestID := logging.GetRequestID(ctx)
+	if requestID == "" {
+		requestID = "unknown"
+	}
+	return fmt.Sprintf("[claude dry-run] request_id=%s inspect request log", requestID)
+}
+
+func claudeDryRunHeaders(contentType string) http.Header {
+	headers := make(http.Header, 2)
+	headers.Set(claudeDryRunHeader, "true")
+	if strings.TrimSpace(contentType) != "" {
+		headers.Set("Content-Type", contentType)
+	}
+	return headers
+}
+
+func buildClaudeDryRunMessageResponse(baseModel, hint string) []byte {
+	out := []byte(`{"id":"msg_dry_run","type":"message","role":"assistant","model":"","content":[{"type":"text","text":""}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	out, _ = sjson.SetBytes(out, "model", baseModel)
+	out, _ = sjson.SetBytes(out, "content.0.text", hint)
+	return out
+}
+
+func buildClaudeDryRunStreamResponse(baseModel, hint string) []byte {
+	out := make([]byte, 0, 512)
+	messageStart := []byte(`{"type":"message_start","message":{"id":"msg_dry_run","type":"message","role":"assistant","content":[],"model":"","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
+	messageStart, _ = sjson.SetBytes(messageStart, "message.model", baseModel)
+	out = translatorcommon.AppendSSEEventBytes(out, "message_start", messageStart, 2)
+	out = translatorcommon.AppendSSEEventString(out, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`, 2)
+	contentDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
+	contentDelta, _ = sjson.SetBytes(contentDelta, "delta.text", hint)
+	out = translatorcommon.AppendSSEEventBytes(out, "content_block_delta", contentDelta, 2)
+	out = translatorcommon.AppendSSEEventString(out, "content_block_stop", `{"type":"content_block_stop","index":0}`, 2)
+	out = translatorcommon.AppendSSEEventString(out, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`, 2)
+	out = translatorcommon.AppendSSEEventString(out, "message_stop", `{"type":"message_stop"}`, 2)
+	return out
+}
+
+func buildClaudeDryRunCountTokensResponse(hint string) []byte {
+	out := []byte(`{"input_tokens":0,"dry_run":true,"dry_run_hint":""}`)
+	out, _ = sjson.SetBytes(out, "dry_run_hint", hint)
+	return out
+}
+
+func (e *ClaudeExecutor) executeDryRun(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, bodyForTranslation []byte, baseModel string, from, to sdktranslator.Format) (cliproxyexecutor.Response, error) {
+	headers := claudeDryRunHeaders("application/json")
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, http.StatusOK, headers.Clone())
+	payload := buildClaudeDryRunMessageResponse(baseModel, claudeDryRunHint(ctx))
+	helps.AppendAPIResponseChunk(ctx, e.cfg, payload)
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, payload, &param)
+	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
+}
+
+func (e *ClaudeExecutor) executeDryRunStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, bodyForTranslation []byte, baseModel string, from, to sdktranslator.Format) (*cliproxyexecutor.StreamResult, error) {
+	headers := claudeDryRunHeaders("text/event-stream")
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, http.StatusOK, headers.Clone())
+	raw := buildClaudeDryRunStreamResponse(baseModel, claudeDryRunHint(ctx))
+	out := make(chan cliproxyexecutor.StreamChunk, 1)
+	go func() {
+		defer close(out)
+		if from == to {
+			helps.AppendAPIResponseChunk(ctx, e.cfg, raw)
+			out <- cliproxyexecutor.StreamChunk{Payload: raw}
+			return
+		}
+		var param any
+		for _, line := range bytes.Split(raw, []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			chunks := sdktranslator.TranslateStream(
+				ctx,
+				to,
+				from,
+				req.Model,
+				opts.OriginalRequest,
+				bodyForTranslation,
+				bytes.Clone(line),
+				&param,
+			)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
+func (e *ClaudeExecutor) countTokensDryRun(ctx context.Context, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options, from, to sdktranslator.Format) (cliproxyexecutor.Response, error) {
+	headers := claudeDryRunHeaders("application/json")
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, http.StatusOK, headers.Clone())
+	payload := buildClaudeDryRunCountTokensResponse(claudeDryRunHint(ctx))
+	helps.AppendAPIResponseChunk(ctx, e.cfg, payload)
+	out := sdktranslator.TranslateTokenCount(ctx, to, from, 0, payload)
+	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

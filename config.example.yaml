@@ -218,6 +218,12 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
+# Claude OAuth/file-backed auth provider settings.
+# These apply only to Claude auth JSON files in auth-dir. They do not affect claude-api-key entries.
+# claude:
+#   base-url: "https://www.example.com" # optional: custom Claude-compatible endpoint for OAuth/file-backed auth
+#   dry-run: false                      # optional: when true, skip upstream calls and return synthetic success responses
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies only to HTTP requests;

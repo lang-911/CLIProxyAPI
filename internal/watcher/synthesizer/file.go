@@ -137,6 +137,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	if provider == "claude" && cfg != nil {
+		if baseURL := strings.TrimSpace(cfg.Claude.BaseURL); baseURL != "" {
+			a.Attributes["base_url"] = baseURL
+		}
+		if cfg.Claude.DryRun {
+			a.Attributes["dry_run"] = "true"
+		}
+	}
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {

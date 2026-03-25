@@ -53,3 +53,28 @@ claude-header-defaults:
 		t.Fatalf("StabilizeDeviceProfile = %v, want false", got)
 	}
 }
+
+func TestLoadConfigOptional_ClaudeProviderConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := []byte(`
+claude:
+  base-url: "  https://claude.example.com/base  "
+  dry-run: true
+`)
+	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+
+	if got := cfg.Claude.BaseURL; got != "https://claude.example.com/base" {
+		t.Fatalf("Claude.BaseURL = %q, want %q", got, "https://claude.example.com/base")
+	}
+	if !cfg.Claude.DryRun {
+		t.Fatal("Claude.DryRun = false, want true")
+	}
+}
