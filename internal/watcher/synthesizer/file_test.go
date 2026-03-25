@@ -152,6 +152,86 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_ClaudeInheritsProviderConfig(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":  "claude",
+		"email": "test@example.com",
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "claude-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			Claude: config.ClaudeProviderConfig{
+				BaseURL: "https://claude.example.com",
+				DryRun:  true,
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["base_url"]; got != "https://claude.example.com" {
+		t.Fatalf("base_url = %q, want %q", got, "https://claude.example.com")
+	}
+	if got := auths[0].Attributes["dry_run"]; got != "true" {
+		t.Fatalf("dry_run = %q, want %q", got, "true")
+	}
+}
+
+func TestFileSynthesizer_Synthesize_NonClaudeDoesNotInheritClaudeProviderConfig(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":  "codex",
+		"email": "test@example.com",
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			Claude: config.ClaudeProviderConfig{
+				BaseURL: "https://claude.example.com",
+				DryRun:  true,
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["base_url"]; got != "" {
+		t.Fatalf("base_url = %q, want empty", got)
+	}
+	if got := auths[0].Attributes["dry_run"]; got != "" {
+		t.Fatalf("dry_run = %q, want empty", got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	tempDir := t.TempDir()
 

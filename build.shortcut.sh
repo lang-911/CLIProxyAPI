@@ -2,7 +2,7 @@
 set -e
 set -u
 
-CPA_VERSION=v6.8.55-2
+CPA_VERSION=v6.9.1-0
 
 ./build.sh ${CPA_VERSION} \
  && mv cli-proxy-api_${CPA_VERSION}_darwin_amd64 ~/.cli-proxy-api/ \
