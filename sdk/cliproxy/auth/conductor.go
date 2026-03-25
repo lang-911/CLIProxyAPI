@@ -3568,7 +3568,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a)
+		return p.PrepareRequest(req, a.Clone())
 	}
 	return nil
 }
@@ -3599,7 +3599,7 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if !ok || preparer == nil {
 		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
 	}
-	return preparer.PrepareRequest(req, auth)
+	return preparer.PrepareRequest(req, auth.Clone())
 }
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.

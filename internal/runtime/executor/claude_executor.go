@@ -84,22 +84,55 @@ var oauthToolsToRemove = map[string]bool{}
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const (
-	claudeDryRunHeader    = "X-CPA-Dry-Run"
-	defaultModelMaxTokens = 1024
+	claudeDryRunHeader       = "X-CPA-Dry-Run"
+	claudeOAuthRefreshWindow = time.Minute
+	defaultModelMaxTokens    = 1024
 )
+
+var claudeRefreshTokensFunc = func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+	svc := claudeauth.NewClaudeAuth(cfg)
+	return svc.RefreshTokens(ctx, refreshToken)
+}
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
-// PrepareRequest injects Claude credentials into the outgoing HTTP request.
-func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
-	if req == nil {
-		return nil
+func (e *ClaudeExecutor) resolveRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil {
+		return nil, nil
 	}
-	apiKey, _ := claudeCreds(auth)
-	if strings.TrimSpace(apiKey) == "" {
-		return nil
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
+		return auth, nil
+	}
+
+	expiry, hasExpiry := auth.ExpirationTime()
+	if !hasExpiry || expiry.IsZero() {
+		return auth, nil
+	}
+	if expiry.After(time.Now().Add(claudeOAuthRefreshWindow)) {
+		return auth, nil
+	}
+
+	refreshToken := ""
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["refresh_token"].(string); ok {
+			refreshToken = strings.TrimSpace(v)
+		}
+	}
+	if refreshToken == "" {
+		return nil, fmt.Errorf("claude executor: oauth token expires at %s but refresh_token is missing", expiry.Format(time.RFC3339))
+	}
+
+	return e.Refresh(ctx, auth.Clone())
+}
+
+func applyClaudeRequestCredentials(req *http.Request, auth *cliproxyauth.Auth, apiKey string) {
+	if req == nil || strings.TrimSpace(apiKey) == "" {
+		return
 	}
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 	isAnthropicBase := req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com")
@@ -115,6 +148,20 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+}
+
+// PrepareRequest injects Claude credentials into the outgoing HTTP request.
+func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	var err error
+	auth, err = e.resolveRequestAuth(req.Context(), auth)
+	if err != nil {
+		return err
+	}
+	apiKey, _ := claudeCreds(auth)
+	applyClaudeRequestCredentials(req, auth, apiKey)
 	return nil
 }
 
@@ -126,10 +173,14 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if ctx == nil {
 		ctx = req.Context()
 	}
-	httpReq := req.WithContext(ctx)
-	if err := e.PrepareRequest(httpReq, auth); err != nil {
+	var err error
+	auth, err = e.resolveRequestAuth(ctx, auth)
+	if err != nil {
 		return nil, err
 	}
+	apiKey, _ := claudeCreds(auth)
+	httpReq := req.WithContext(ctx)
+	applyClaudeRequestCredentials(httpReq, auth, apiKey)
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
@@ -140,6 +191,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
+	auth, err = e.resolveRequestAuth(ctx, auth)
+	if err != nil {
+		return resp, err
+	}
 	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -328,6 +383,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
+	auth, err = e.resolveRequestAuth(ctx, auth)
+	if err != nil {
+		return nil, err
+	}
 	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -542,6 +601,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
+	var err error
+	auth, err = e.resolveRequestAuth(ctx, auth)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
 
 	from := opts.SourceFormat
@@ -771,6 +835,9 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if auth == nil {
 		return nil, fmt.Errorf("claude executor: auth is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var refreshToken string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
@@ -780,8 +847,17 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	refreshCfg := e.cfg
+	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+		if refreshCfg != nil {
+			cfgCopy := *refreshCfg
+			cfgCopy.ProxyURL = strings.TrimSpace(auth.ProxyURL)
+			refreshCfg = &cfgCopy
+		} else {
+			refreshCfg = &config.Config{SDKConfig: config.SDKConfig{ProxyURL: strings.TrimSpace(auth.ProxyURL)}}
+		}
+	}
+	td, err := claudeRefreshTokensFunc(ctx, refreshCfg, refreshToken)
 	if err != nil {
 		return nil, err
 	}

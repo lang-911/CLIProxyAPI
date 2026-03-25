@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -44,6 +45,33 @@ func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Reques
 
 	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
 	return req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
+}
+
+func stubClaudeRefreshTokens(t *testing.T, fn func(context.Context, *config.Config, string) (*claudeauth.ClaudeTokenData, error)) {
+	t.Helper()
+	original := claudeRefreshTokensFunc
+	claudeRefreshTokensFunc = fn
+	t.Cleanup(func() {
+		claudeRefreshTokensFunc = original
+	})
+}
+
+func newClaudeOAuthTestAuth(accessToken, refreshToken, baseURL string, expiry time.Time) *cliproxyauth.Auth {
+	attributes := map[string]string{}
+	if strings.TrimSpace(baseURL) != "" {
+		attributes["base_url"] = baseURL
+	}
+	return &cliproxyauth.Auth{
+		Provider:   "claude",
+		Attributes: attributes,
+		Metadata: map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+			"expired":       expiry.Format(time.RFC3339),
+			"email":         "user@example.com",
+			"type":          "claude",
+		},
+	}
 }
 
 func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
@@ -262,6 +290,173 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 	})
 	applyClaudeHeaders(thirdPartyReq, "", auth, "key-baseline-reload", false, nil, newCfg)
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+}
+
+func TestClaudeExecutor_Execute_RefreshesOAuthTokenAtExpiryBoundary(t *testing.T) {
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-now" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-now")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  "refreshed-now-token",
+			RefreshToken: "refresh-now-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	var gotAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth("expired-token", "refresh-now", server.URL, time.Now())
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if gotAuthorization != "Bearer refreshed-now-token" {
+		t.Fatalf("Authorization = %q, want %q", gotAuthorization, "Bearer refreshed-now-token")
+	}
+	if got := auth.Metadata["access_token"]; got != "expired-token" {
+		t.Fatalf("original access_token = %v, want %q", got, "expired-token")
+	}
+}
+
+func TestClaudeExecutor_PrepareRequest_RefreshesOAuthTokenWithinSafetyWindow(t *testing.T) {
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-soon" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-soon")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  "refreshed-soon-token",
+			RefreshToken: "refresh-soon-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth("soon-expiring-token", "refresh-soon", "", time.Now().Add(45*time.Second))
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest() error = %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer refreshed-soon-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer refreshed-soon-token")
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key = %q, want empty", got)
+	}
+	if got := auth.Metadata["access_token"]; got != "soon-expiring-token" {
+		t.Fatalf("original access_token = %v, want %q", got, "soon-expiring-token")
+	}
+}
+
+func TestClaudeExecutor_HttpRequest_RefreshesOAuthTokenBeforeSending(t *testing.T) {
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-http" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-http")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  "refreshed-http-token",
+			RefreshToken: "refresh-http-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	var gotAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth("http-expiring-token", "refresh-http", "", time.Now().Add(30*time.Second))
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	resp, err := executor.HttpRequest(context.Background(), auth, req)
+	if err != nil {
+		t.Fatalf("HttpRequest() error = %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("response close error = %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if gotAuthorization != "Bearer refreshed-http-token" {
+		t.Fatalf("Authorization = %q, want %q", gotAuthorization, "Bearer refreshed-http-token")
+	}
+}
+
+func TestClaudeExecutor_PrepareRequest_DoesNotRefreshAPIKeyAuth(t *testing.T) {
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		return nil, nil
+	})
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "api-key-123",
+		},
+		Metadata: map[string]any{
+			"refresh_token": "refresh-ignored",
+			"expired":       time.Now().Format(time.RFC3339),
+			"email":         "user@example.com",
+		},
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	if err := executor.PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest() error = %v", err)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 0)
+	}
+	if got := req.Header.Get("x-api-key"); got != "api-key-123" {
+		t.Fatalf("x-api-key = %q, want %q", got, "api-key-123")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty", got)
+	}
 }
 
 func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback(t *testing.T) {
