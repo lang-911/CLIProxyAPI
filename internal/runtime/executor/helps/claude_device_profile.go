@@ -63,6 +63,10 @@ func (v claudeCLIVersion) Compare(other claudeCLIVersion) int {
 	}
 }
 
+func (v claudeCLIVersion) String() string {
+	return strconv.Itoa(v.major) + "." + strconv.Itoa(v.minor) + "." + strconv.Itoa(v.patch)
+}
+
 type ClaudeDeviceProfile struct {
 	UserAgent      string
 	PackageVersion string
@@ -358,14 +362,17 @@ func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfil
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
 }
 
-// DefaultClaudeVersion returns the version string (e.g. "2.1.63") from the
+// DefaultClaudeVersion returns the version string from the current baseline
 // current baseline device profile. It extracts the version from the User-Agent.
 func DefaultClaudeVersion(cfg *config.Config) string {
 	profile := defaultClaudeDeviceProfile(cfg)
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
-		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
+		return version.String()
 	}
-	return "2.1.63"
+	if version, ok := parseClaudeCLIVersion(defaultClaudeFingerprintUserAgent); ok {
+		return version.String()
+	}
+	return ""
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {

@@ -616,7 +616,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructions(body, e.cfg)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -1207,8 +1207,8 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return
 }
 
-func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+func checkSystemInstructions(payload []byte, cfg *config.Config) []byte {
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, helps.DefaultClaudeVersion(cfg), "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1726,8 +1726,8 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;%s", version, buildHash, entrypoint, cch, workloadPart)
 }
 
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *config.Config) []byte {
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, helps.DefaultClaudeVersion(cfg), "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
