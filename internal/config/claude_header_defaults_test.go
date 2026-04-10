@@ -74,6 +74,14 @@ claude:
       server: "ignored"
     - pattern: "^read$"
       server: "   "
+  system-prompt-transformations:
+    - pattern: "  <directories>\\n  \\n</directories>  "
+    - pattern: "  ^prefix\\s+"
+      replace: "  replacement: "
+    - pattern: "  [  "
+      replace: "ignored"
+    - pattern: "   "
+      replace: "ignored"
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -105,5 +113,28 @@ claude:
 	}
 	if rule.Match("read_file") {
 		t.Fatal("expected compiled regex not to match read_file")
+	}
+	if len(cfg.Claude.SystemPromptTransformations) != 2 {
+		t.Fatalf("Claude.SystemPromptTransformations len = %d, want 2", len(cfg.Claude.SystemPromptTransformations))
+	}
+	removeRule := cfg.Claude.SystemPromptTransformations[0]
+	if got := removeRule.Pattern; got != "<directories>\\n  \\n</directories>" {
+		t.Fatalf("removeRule.Pattern = %q, want %q", got, "<directories>\\n  \\n</directories>")
+	}
+	if got := removeRule.Replace; got != "" {
+		t.Fatalf("removeRule.Replace = %q, want empty string", got)
+	}
+	if got := removeRule.Apply("a<directories>\n  \n</directories>b"); got != "ab" {
+		t.Fatalf("removeRule.Apply() = %q, want %q", got, "ab")
+	}
+	replaceRule := cfg.Claude.SystemPromptTransformations[1]
+	if got := replaceRule.Pattern; got != "^prefix\\s+" {
+		t.Fatalf("replaceRule.Pattern = %q, want %q", got, "^prefix\\s+")
+	}
+	if got := replaceRule.Replace; got != "  replacement: " {
+		t.Fatalf("replaceRule.Replace = %q, want %q", got, "  replacement: ")
+	}
+	if got := replaceRule.Apply("prefix value"); got != "  replacement: value" {
+		t.Fatalf("replaceRule.Apply() = %q, want %q", got, "  replacement: value")
 	}
 }

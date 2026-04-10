@@ -231,6 +231,9 @@ nonstream-keepalive-interval: 0
 #       server: 'context7'
 #     - pattern: '^figma_.*$'
 #       server: 'figma'
+#   system-prompt-transformations:      # optional: regex-based rewrites for Claude OAuth/file-backed auth system prompt text blocks
+#     - pattern: "<directories>\\n  \\n</directories>"
+#       replace: ""
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,9 +80,11 @@ var oauthToolsToRemove = map[string]bool{}
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const (
-	claudeDryRunHeader       = "X-CPA-Dry-Run"
-	claudeOAuthRefreshWindow = time.Minute
-	defaultModelMaxTokens    = 1024
+	claudeDryRunHeader            = "X-CPA-Dry-Run"
+	claudeOAuthRefreshWindow      = time.Minute
+	defaultModelMaxTokens         = 1024
+	claudeBillingHeaderPrefix     = "x-anthropic-billing-header:"
+	claudeCodeAgentIdentifierText = "You are Claude Code, Anthropic's official CLI for Claude."
 )
 
 var claudeRefreshTokensFunc = func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
@@ -223,6 +226,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
+		body = applyClaudeSystemPromptTransformations(body, rules)
+	}
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -415,6 +421,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
+		body = applyClaudeSystemPromptTransformations(body, rules)
+	}
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -621,6 +630,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body, e.cfg)
+	}
+	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
+		body = applyClaudeSystemPromptTransformations(body, rules)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -1435,6 +1447,107 @@ func resolveClaudeToolNameTransformations(cfg *config.Config, auth *cliproxyauth
 	return cfg.Claude.ToolNameTransformations
 }
 
+func resolveClaudeSystemPromptTransformations(cfg *config.Config, apiKey string) []config.ClaudeSystemPromptTransformation {
+	if cfg == nil || !isClaudeOAuthToken(apiKey) {
+		return nil
+	}
+	if len(cfg.Claude.SystemPromptTransformations) == 0 {
+		return nil
+	}
+	return cfg.Claude.SystemPromptTransformations
+}
+
+func applyClaudeSystemPromptTransformations(body []byte, rules []config.ClaudeSystemPromptTransformation) []byte {
+	if len(rules) == 0 {
+		return body
+	}
+
+	system := gjson.GetBytes(body, "system")
+	if !system.Exists() {
+		return body
+	}
+
+	if system.Type == gjson.String {
+		transformed := transformClaudeSystemPromptText(system.String(), rules)
+		if strings.TrimSpace(transformed) == "" {
+			updated, err := sjson.DeleteBytes(body, "system")
+			if err == nil {
+				return updated
+			}
+			return body
+		}
+		updated, err := sjson.SetRawBytes(body, "system", rawJSONString(transformed))
+		if err == nil {
+			return updated
+		}
+		return body
+	}
+
+	if !system.IsArray() {
+		return body
+	}
+
+	parts := system.Array()
+	rewritten := make([]string, 0, len(parts))
+	skipCount := claudeInjectedSystemPrefixLength(parts)
+	for i, part := range parts {
+		partJSON := part.Raw
+		if i >= skipCount && part.Get("type").String() == "text" {
+			original := part.Get("text").String()
+			transformed := transformClaudeSystemPromptText(original, rules)
+			if strings.TrimSpace(transformed) == "" {
+				continue
+			}
+			if transformed != original {
+				updated, err := sjson.SetRawBytes([]byte(partJSON), "text", rawJSONString(transformed))
+				if err == nil {
+					partJSON = string(updated)
+				}
+			}
+		}
+		rewritten = append(rewritten, partJSON)
+	}
+
+	if len(rewritten) == 0 {
+		updated, err := sjson.DeleteBytes(body, "system")
+		if err == nil {
+			return updated
+		}
+		return body
+	}
+
+	updated, err := sjson.SetRawBytes(body, "system", []byte("["+strings.Join(rewritten, ",")+"]"))
+	if err == nil {
+		return updated
+	}
+	return body
+}
+
+func transformClaudeSystemPromptText(text string, rules []config.ClaudeSystemPromptTransformation) string {
+	out := text
+	for i := range rules {
+		out = rules[i].Apply(out)
+	}
+	return out
+}
+
+func rawJSONString(value string) []byte {
+	return []byte(strconv.Quote(value))
+}
+
+func claudeInjectedSystemPrefixLength(parts []gjson.Result) int {
+	if len(parts) < 2 {
+		return 0
+	}
+	if parts[0].Get("type").String() != "text" || !strings.HasPrefix(parts[0].Get("text").String(), claudeBillingHeaderPrefix) {
+		return 0
+	}
+	if parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != claudeCodeAgentIdentifierText {
+		return 0
+	}
+	return 2
+}
+
 func applyClaudeToolNameTransformations(body []byte, rules []config.ClaudeToolNameTransformation) ([]byte, map[string]string) {
 	if len(rules) == 0 {
 		return body, nil
@@ -1924,7 +2037,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
-	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+	if strings.HasPrefix(firstText, claudeBillingHeaderPrefix) {
 		return payload
 	}
 
@@ -1935,7 +2048,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
 	// scope='org' in the API request. Only scope='global' is sent explicitly.
 	// The system prompt prefix block is sent without cache_control.
-	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
+	agentBlock := buildTextBlock(claudeCodeAgentIdentifierText, nil)
 	if strictMode {
 		systemResult := "[" + billingBlock + "," + agentBlock + "]"
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))

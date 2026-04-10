@@ -168,6 +168,9 @@ type ClaudeProviderConfig struct {
 	DryRun bool `yaml:"dry-run,omitempty" json:"dry-run,omitempty"`
 	// ToolNameTransformations rewrites matching custom tool names before upstream Claude OAuth requests.
 	ToolNameTransformations []ClaudeToolNameTransformation `yaml:"tool-name-transformations,omitempty" json:"tool-name-transformations,omitempty"`
+	// SystemPromptTransformations rewrites matching text inside Claude system prompt blocks
+	// before upstream Claude OAuth requests.
+	SystemPromptTransformations []ClaudeSystemPromptTransformation `yaml:"system-prompt-transformations,omitempty" json:"system-prompt-transformations,omitempty"`
 }
 
 // ClaudeToolNameTransformation describes how matching custom Claude tool names
@@ -182,6 +185,23 @@ type ClaudeToolNameTransformation struct {
 // Match reports whether the configured regular expression matches the provided tool name.
 func (t ClaudeToolNameTransformation) Match(name string) bool {
 	return t.patternRE != nil && t.patternRE.MatchString(name)
+}
+
+// ClaudeSystemPromptTransformation describes how matching text within Claude
+// system prompt blocks should be rewritten for Claude OAuth/file-backed auth requests.
+type ClaudeSystemPromptTransformation struct {
+	Pattern string `yaml:"pattern" json:"pattern"`
+	Replace string `yaml:"replace,omitempty" json:"replace,omitempty"`
+
+	patternRE *regexp.Regexp `yaml:"-" json:"-"`
+}
+
+// Apply rewrites matching text using the configured regular expression.
+func (t ClaudeSystemPromptTransformation) Apply(text string) string {
+	if t.patternRE == nil {
+		return text
+	}
+	return t.patternRE.ReplaceAllString(text, t.Replace)
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -842,31 +862,53 @@ func (cfg *Config) SanitizeClaudeProviderConfig() {
 		return
 	}
 	cfg.Claude.BaseURL = strings.TrimSpace(cfg.Claude.BaseURL)
-	if len(cfg.Claude.ToolNameTransformations) == 0 {
-		return
+
+	if len(cfg.Claude.ToolNameTransformations) > 0 {
+		out := make([]ClaudeToolNameTransformation, 0, len(cfg.Claude.ToolNameTransformations))
+		for i := range cfg.Claude.ToolNameTransformations {
+			rule := cfg.Claude.ToolNameTransformations[i]
+			rule.Pattern = strings.TrimSpace(rule.Pattern)
+			rule.Server = strings.TrimSpace(rule.Server)
+			if rule.Pattern == "" || rule.Server == "" {
+				continue
+			}
+			compiled, err := regexp.Compile(rule.Pattern)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"provider":   "claude",
+					"rule_index": i + 1,
+					"pattern":    rule.Pattern,
+				}).Warn("claude tool-name-transformation dropped: invalid regex")
+				continue
+			}
+			rule.patternRE = compiled
+			out = append(out, rule)
+		}
+		cfg.Claude.ToolNameTransformations = out
 	}
 
-	out := make([]ClaudeToolNameTransformation, 0, len(cfg.Claude.ToolNameTransformations))
-	for i := range cfg.Claude.ToolNameTransformations {
-		rule := cfg.Claude.ToolNameTransformations[i]
-		rule.Pattern = strings.TrimSpace(rule.Pattern)
-		rule.Server = strings.TrimSpace(rule.Server)
-		if rule.Pattern == "" || rule.Server == "" {
-			continue
+	if len(cfg.Claude.SystemPromptTransformations) > 0 {
+		out := make([]ClaudeSystemPromptTransformation, 0, len(cfg.Claude.SystemPromptTransformations))
+		for i := range cfg.Claude.SystemPromptTransformations {
+			rule := cfg.Claude.SystemPromptTransformations[i]
+			rule.Pattern = strings.TrimSpace(rule.Pattern)
+			if rule.Pattern == "" {
+				continue
+			}
+			compiled, err := regexp.Compile(rule.Pattern)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"provider":   "claude",
+					"rule_index": i + 1,
+					"pattern":    rule.Pattern,
+				}).Warn("claude system-prompt-transformation dropped: invalid regex")
+				continue
+			}
+			rule.patternRE = compiled
+			out = append(out, rule)
 		}
-		compiled, err := regexp.Compile(rule.Pattern)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"provider":   "claude",
-				"rule_index": i + 1,
-				"pattern":    rule.Pattern,
-			}).Warn("claude tool-name-transformation dropped: invalid regex")
-			continue
-		}
-		rule.patternRE = compiled
-		out = append(out, rule)
+		cfg.Claude.SystemPromptTransformations = out
 	}
-	cfg.Claude.ToolNameTransformations = out
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
