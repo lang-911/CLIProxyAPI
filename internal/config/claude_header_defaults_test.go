@@ -65,6 +65,15 @@ func TestLoadConfigOptional_ClaudeProviderConfig(t *testing.T) {
 claude:
   base-url: "  https://claude.example.com/base  "
   dry-run: true
+  tool-name-transformations:
+    - pattern: "  ^list_.*$  "
+      server: "  serena  "
+    - pattern: "  [  "
+      server: "ignored"
+    - pattern: "   "
+      server: "ignored"
+    - pattern: "^read$"
+      server: "   "
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -80,5 +89,21 @@ claude:
 	}
 	if !cfg.Claude.DryRun {
 		t.Fatal("Claude.DryRun = false, want true")
+	}
+	if len(cfg.Claude.ToolNameTransformations) != 1 {
+		t.Fatalf("Claude.ToolNameTransformations len = %d, want 1", len(cfg.Claude.ToolNameTransformations))
+	}
+	rule := cfg.Claude.ToolNameTransformations[0]
+	if got := rule.Pattern; got != "^list_.*$" {
+		t.Fatalf("rule.Pattern = %q, want %q", got, "^list_.*$")
+	}
+	if got := rule.Server; got != "serena" {
+		t.Fatalf("rule.Server = %q, want %q", got, "serena")
+	}
+	if !rule.Match("list_dir") {
+		t.Fatal("expected compiled regex to match list_dir")
+	}
+	if rule.Match("read_file") {
+		t.Fatal("expected compiled regex not to match read_file")
 	}
 }

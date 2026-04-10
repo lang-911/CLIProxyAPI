@@ -224,6 +224,13 @@ nonstream-keepalive-interval: 0
 # claude:
 #   base-url: "https://www.example.com" # optional: custom Claude-compatible endpoint for OAuth/file-backed auth
 #   dry-run: false                      # optional: when true, skip upstream calls and return synthetic success responses
+#   tool-name-transformations:          # optional: rewrite matching custom tool names for Claude OAuth/file-backed auth
+#     - pattern: '^(?:(?:background|task|ast_grep|session|lsp)_.*|skill_mcp|look_at|interactive_bash|websearch_web_search_exa|grep_app_searchGitHub)$'
+#       server: 'omo'
+#     - pattern: '^context7_.*$'
+#       server: 'context7'
+#     - pattern: '^figma_.*$'
+#       server: 'figma'
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client

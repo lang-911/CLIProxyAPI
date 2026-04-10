@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -165,6 +166,22 @@ type ClaudeProviderConfig struct {
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 	// DryRun skips upstream calls and returns synthetic success responses when enabled.
 	DryRun bool `yaml:"dry-run,omitempty" json:"dry-run,omitempty"`
+	// ToolNameTransformations rewrites matching custom tool names before upstream Claude OAuth requests.
+	ToolNameTransformations []ClaudeToolNameTransformation `yaml:"tool-name-transformations,omitempty" json:"tool-name-transformations,omitempty"`
+}
+
+// ClaudeToolNameTransformation describes how matching custom Claude tool names
+// should be rewritten for Claude OAuth/file-backed auth requests.
+type ClaudeToolNameTransformation struct {
+	Pattern string `yaml:"pattern" json:"pattern"`
+	Server  string `yaml:"server" json:"server"`
+
+	patternRE *regexp.Regexp `yaml:"-" json:"-"`
+}
+
+// Match reports whether the configured regular expression matches the provided tool name.
+func (t ClaudeToolNameTransformation) Match(name string) bool {
+	return t.patternRE != nil && t.patternRE.MatchString(name)
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -825,6 +842,31 @@ func (cfg *Config) SanitizeClaudeProviderConfig() {
 		return
 	}
 	cfg.Claude.BaseURL = strings.TrimSpace(cfg.Claude.BaseURL)
+	if len(cfg.Claude.ToolNameTransformations) == 0 {
+		return
+	}
+
+	out := make([]ClaudeToolNameTransformation, 0, len(cfg.Claude.ToolNameTransformations))
+	for i := range cfg.Claude.ToolNameTransformations {
+		rule := cfg.Claude.ToolNameTransformations[i]
+		rule.Pattern = strings.TrimSpace(rule.Pattern)
+		rule.Server = strings.TrimSpace(rule.Server)
+		if rule.Pattern == "" || rule.Server == "" {
+			continue
+		}
+		compiled, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"provider":   "claude",
+				"rule_index": i + 1,
+				"pattern":    rule.Pattern,
+			}).Warn("claude tool-name-transformation dropped: invalid regex")
+			continue
+		}
+		rule.patternRE = compiled
+		out = append(out, rule)
+	}
+	cfg.Claude.ToolNameTransformations = out
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

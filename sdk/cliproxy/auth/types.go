@@ -285,8 +285,8 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	return false, false
 }
 
-// ToolPrefixDisabled returns whether the proxy_ tool name prefix should be
-// skipped for this auth. When true, tool names are sent to Anthropic unchanged.
+// ToolPrefixDisabled returns whether Claude OAuth tool name rewriting should be
+// skipped for this auth. When true, tool names are sent upstream unchanged.
 // The value is read from metadata key "tool_prefix_disabled" (or "tool-prefix-disabled").
 func (a *Auth) ToolPrefixDisabled() bool {
 	if a == nil || a.Metadata == nil {
