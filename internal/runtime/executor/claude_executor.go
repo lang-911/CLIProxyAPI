@@ -94,6 +94,10 @@ var claudeRefreshTokensFunc = func(ctx context.Context, cfg *config.Config, refr
 	return svc.RefreshTokens(ctx, refreshToken)
 }
 
+type claudeSessionIDContextKey struct{}
+
+type claudeVersionContextKey struct{}
+
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
@@ -196,6 +200,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
+	ctx = withResolvedClaudeRequestContext(ctx, e.cfg, auth, apiKey)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -217,7 +222,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
-	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
+	// Apply cloaking (system prompt injection, Claude-compatible metadata, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
@@ -388,6 +393,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
+	ctx = withResolvedClaudeRequestContext(ctx, e.cfg, auth, apiKey)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -407,7 +413,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
-	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
+	// Apply cloaking (system prompt injection, Claude-compatible metadata, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
@@ -607,6 +613,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		return cliproxyexecutor.Response{}, err
 	}
 	apiKey, baseURL, dryRun := resolveClaudeExecutionSettings(auth)
+	ctx = withResolvedClaudeRequestContext(ctx, e.cfg, auth, apiKey)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -1092,10 +1099,7 @@ func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Au
 	}
 	r.Header.Set("Content-Type", "application/json")
 
-	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
-	}
+	ginHeaders := getClientHeadersFromContext(r.Context())
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
 	if stabilizeDeviceProfile {
@@ -1154,7 +1158,10 @@ func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Au
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	sessionID := resolvedClaudeSessionID(r.Context(), apiKey)
+	if sessionID != "" {
+		r.Header.Set("X-Claude-Code-Session-Id", sessionID)
+	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	if isAnthropicBase {
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
@@ -1183,6 +1190,9 @@ func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Au
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if sessionID != "" {
+		r.Header.Set("X-Claude-Code-Session-Id", sessionID)
+	}
 	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
 	// may override it with a user-configured value.  Compressed SSE breaks the line
 	// scanner regardless of user preference, so this is non-negotiable for streams.
@@ -1592,12 +1602,75 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	return updated
 }
 
+func getClientHeadersFromContext(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.Request.Header
+	}
+	return nil
+}
+
 // getClientUserAgent extracts the client User-Agent from the gin context.
 func getClientUserAgent(ctx context.Context) string {
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return ginCtx.GetHeader("User-Agent")
+	return strings.TrimSpace(getClientHeadersFromContext(ctx).Get("User-Agent"))
+}
+
+func resolveClaudeSessionIDFromHeaders(headers http.Header, apiKey string) string {
+	if headers != nil {
+		if sessionID := strings.TrimSpace(headers.Get("X-Claude-Code-Session-Id")); sessionID != "" {
+			return sessionID
+		}
 	}
-	return ""
+	return helps.CachedSessionID(apiKey)
+}
+
+func resolveEffectiveClaudeVersion(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) string {
+	if ctx != nil {
+		if resolved, ok := ctx.Value(claudeVersionContextKey{}).(string); ok && strings.TrimSpace(resolved) != "" {
+			return strings.TrimSpace(resolved)
+		}
+	}
+
+	headers := getClientHeadersFromContext(ctx)
+	if helps.ClaudeDeviceProfileStabilizationEnabled(cfg) {
+		profile := helps.ResolveClaudeDeviceProfile(auth, apiKey, headers, cfg)
+		if version, ok := helps.ClaudeVersionFromUserAgent(profile.UserAgent); ok {
+			return version
+		}
+	}
+
+	if auth != nil && auth.Attributes != nil {
+		if version, ok := helps.ClaudeVersionFromUserAgent(auth.Attributes["header:User-Agent"]); ok {
+			return version
+		}
+	}
+
+	return helps.DefaultClaudeVersion(cfg)
+}
+
+func resolvedClaudeSessionID(ctx context.Context, apiKey string) string {
+	if ctx != nil {
+		if resolved, ok := ctx.Value(claudeSessionIDContextKey{}).(string); ok && strings.TrimSpace(resolved) != "" {
+			return strings.TrimSpace(resolved)
+		}
+	}
+	return resolveClaudeSessionIDFromHeaders(getClientHeadersFromContext(ctx), apiKey)
+}
+
+func withResolvedClaudeRequestContext(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	headers := getClientHeadersFromContext(ctx)
+	sessionID := resolveClaudeSessionIDFromHeaders(headers, apiKey)
+	version := resolveEffectiveClaudeVersion(ctx, cfg, auth, apiKey)
+
+	ctx = context.WithValue(ctx, claudeSessionIDContextKey{}, sessionID)
+	ctx = context.WithValue(ctx, claudeVersionContextKey{}, version)
+	return ctx
 }
 
 // parseEntrypointFromUA extracts the entrypoint from a Claude Code User-Agent.
@@ -1626,6 +1699,9 @@ func parseEntrypointFromUA(userAgent string) string {
 
 // getWorkloadFromContext extracts workload identifier from the gin request headers.
 func getWorkloadFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		return strings.TrimSpace(ginCtx.GetHeader("X-CPA-Claude-Workload"))
 	}
@@ -1659,9 +1735,23 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 	return cloakMode, strictMode, sensitiveWords, cacheUserID
 }
 
-// injectFakeUserID generates and injects a fake user ID into the request metadata.
-// When useCache is false, a new user ID is generated for every call.
-func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
+// injectClaudeUserID generates and injects Claude-compatible metadata.user_id values.
+// Claude Code versions before 2.1.78 use the legacy fake user ID format, while
+// 2.1.78+ uses a JSON-encoded string that includes device_id and session_id.
+func injectClaudeUserID(payload []byte, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, useCache bool, effectiveVersion string, sessionID string) []byte {
+	if helps.UsesStructuredClaudeUserID(effectiveVersion) {
+		configuredDeviceID := ""
+		if cfg != nil {
+			configuredDeviceID = cfg.ClaudeHeaderDefaults.DeviceID
+		}
+		userID := helps.BuildStructuredClaudeUserID(
+			helps.ResolveClaudeDeviceID(auth, apiKey, configuredDeviceID),
+			sessionID,
+		)
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", userID)
+		return payload
+	}
+
 	generateID := func() string {
 		if useCache {
 			return helps.CachedUserID(apiKey)
@@ -1903,7 +1993,7 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 }
 
 // applyCloaking applies cloaking transformations to the payload based on config and client.
-// Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
+// Cloaking includes: system prompt injection, Claude-compatible metadata, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
@@ -1948,8 +2038,16 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}
 
-	// Inject fake user ID
-	payload = injectFakeUserID(payload, apiKey, cacheUserID)
+	// Inject Claude-compatible metadata.user_id.
+	payload = injectClaudeUserID(
+		payload,
+		cfg,
+		auth,
+		apiKey,
+		cacheUserID,
+		resolveEffectiveClaudeVersion(ctx, cfg, auth, apiKey),
+		resolvedClaudeSessionID(ctx, apiKey),
+	)
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {

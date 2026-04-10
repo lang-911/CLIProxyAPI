@@ -210,12 +210,13 @@ nonstream-keepalive-interval: 0
 # while user-agent/package-version/runtime-version seed a software fingerprint that can
 # still upgrade to newer official Claude client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.76 (external, sdk-cli)"
+#   user-agent: "claude-cli/2.1.89 (external, cli)"
 #   package-version: "0.74.0"
 #   runtime-version: "v24.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
 #   timeout: "600"
+#   device-id: "59897c0c78fb95ec5c1289f7430674b348f8f874af5f12cef63725ae0847ea0e" # optional stable metadata.device_id override for synthetic Claude metadata
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
 # Claude OAuth/file-backed auth provider settings.

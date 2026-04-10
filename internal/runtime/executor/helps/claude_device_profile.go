@@ -245,14 +245,7 @@ func firstNonEmptyHeader(headers http.Header, name, fallback string) string {
 }
 
 func claudeDeviceProfileScopeKey(auth *cliproxyauth.Auth, apiKey string) string {
-	switch {
-	case auth != nil && strings.TrimSpace(auth.ID) != "":
-		return "auth:" + strings.TrimSpace(auth.ID)
-	case strings.TrimSpace(apiKey) != "":
-		return "api_key:" + strings.TrimSpace(apiKey)
-	default:
-		return "global"
-	}
+	return claudeScopeKey(auth, apiKey)
 }
 
 func claudeDeviceProfileCacheKey(auth *cliproxyauth.Auth, apiKey string) string {

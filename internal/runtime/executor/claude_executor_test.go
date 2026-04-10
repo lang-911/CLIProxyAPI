@@ -103,6 +103,25 @@ func assertBillingHeaderVersion(t *testing.T, billingHeader, version string) {
 	}
 }
 
+func assertStructuredClaudeUserID(t *testing.T, raw, deviceID, sessionID string) {
+	t.Helper()
+
+	if !gjson.ValidBytes([]byte(raw)) {
+		t.Fatalf("metadata.user_id should be valid JSON, got %q", raw)
+	}
+
+	parsed := gjson.Parse(raw)
+	if got := parsed.Get("device_id").String(); got != deviceID {
+		t.Fatalf("metadata.user_id.device_id = %q, want %q", got, deviceID)
+	}
+	if got := parsed.Get("account_uuid").String(); got != "" {
+		t.Fatalf("metadata.user_id.account_uuid = %q, want empty", got)
+	}
+	if got := parsed.Get("session_id").String(); got != sessionID {
+		t.Fatalf("metadata.user_id.session_id = %q, want %q", got, sessionID)
+	}
+}
+
 func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -142,6 +161,25 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
 	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
 		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
+	}
+}
+
+func TestApplyClaudeHeaders_UsesIncomingClaudeSessionID(t *testing.T) {
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"X-Claude-Code-Session-Id": []string{"incoming-session-id"},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-session-id",
+		Attributes: map[string]string{
+			"api_key":                         "key-session-id",
+			"header:X-Claude-Code-Session-Id": "overridden-by-proxy",
+		},
+	}
+
+	applyClaudeHeaders(req, "", auth, "key-session-id", false, nil, nil)
+
+	if got := req.Header.Get("X-Claude-Code-Session-Id"); got != "incoming-session-id" {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want %q", got, "incoming-session-id")
 	}
 }
 
@@ -1453,6 +1491,96 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	}
+}
+
+func TestClaudeExecutor_UsesStructuredUserIDForClaude2178Plus(t *testing.T) {
+	var userID string
+	var sessionHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		userID = gjson.GetBytes(body, "metadata.user_id").String()
+		sessionHeader = r.Header.Get("X-Claude-Code-Session-Id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent: "claude-cli/2.1.89 (external, cli)",
+			DeviceID:  "configured-device-id",
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-structured",
+		"base_url": server.URL,
+	}}
+
+	incoming := http.Header{
+		"X-Claude-Code-Session-Id": []string{"incoming-session-id"},
+	}
+	ctx := newClaudeHeaderTestRequest(t, incoming).Context()
+	legacyUserID := helps.GenerateFakeUserID()
+	payload := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"metadata":{"user_id":"%s"}}`, legacyUserID))
+
+	if _, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+
+	if sessionHeader != "incoming-session-id" {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want %q", sessionHeader, "incoming-session-id")
+	}
+	if userID == legacyUserID {
+		t.Fatalf("expected structured metadata.user_id to replace legacy value %q", legacyUserID)
+	}
+	assertStructuredClaudeUserID(t, userID, "configured-device-id", sessionHeader)
+}
+
+func TestClaudeExecutor_KeepsLegacyUserIDBeforeClaude2178(t *testing.T) {
+	var userID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		userID = gjson.GetBytes(body, "metadata.user_id").String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent: "claude-cli/2.1.77 (external, cli)",
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-legacy-threshold",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+
+	if userID == "" {
+		t.Fatal("expected metadata.user_id to be populated")
+	}
+	if gjson.ValidBytes([]byte(userID)) {
+		t.Fatalf("metadata.user_id = %q, want legacy non-JSON string", userID)
+	}
+	if !helps.IsValidUserID(userID) {
+		t.Fatalf("metadata.user_id = %q, want legacy Claude user_id format", userID)
 	}
 }
 
