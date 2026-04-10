@@ -873,6 +873,98 @@ func sanitizeClaudeToolTransformationsForTest(t *testing.T, rules []config.Claud
 	return cfg.Claude.ToolNameTransformations
 }
 
+func sanitizeClaudeSystemPromptTransformationsForTest(t *testing.T, rules []config.ClaudeSystemPromptTransformation) []config.ClaudeSystemPromptTransformation {
+	t.Helper()
+
+	cfg := &config.Config{
+		Claude: config.ClaudeProviderConfig{
+			SystemPromptTransformations: rules,
+		},
+	}
+	cfg.SanitizeClaudeProviderConfig()
+	return cfg.Claude.SystemPromptTransformations
+}
+
+func captureClaudeUpstreamBodyForMethod(t *testing.T, method string, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte) []byte {
+	t.Helper()
+
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read request body: %v", err)
+		}
+		seenBody = bytes.Clone(body)
+
+		switch method {
+		case "Execute":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		case "ExecuteStream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-5-sonnet\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+			_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		case "CountTokens":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"input_tokens":42}`))
+		default:
+			t.Fatalf("unsupported capture method %q", method)
+		}
+	}))
+	defer server.Close()
+
+	clonedAuth := auth.Clone()
+	if clonedAuth == nil {
+		clonedAuth = &cliproxyauth.Auth{}
+	}
+	if clonedAuth.Attributes == nil {
+		clonedAuth.Attributes = make(map[string]string)
+	}
+	clonedAuth.Attributes["base_url"] = server.URL
+
+	executor := NewClaudeExecutor(cfg)
+	ctx := contextWithClaudeGinHeaders(nil)
+
+	switch method {
+	case "Execute":
+		_, err := executor.Execute(ctx, clonedAuth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	case "ExecuteStream":
+		result, err := executor.ExecuteStream(ctx, clonedAuth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		if err != nil {
+			t.Fatalf("ExecuteStream() error = %v", err)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("ExecuteStream chunk error = %v", chunk.Err)
+			}
+		}
+	case "CountTokens":
+		_, err := executor.CountTokens(ctx, clonedAuth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		if err != nil {
+			t.Fatalf("CountTokens() error = %v", err)
+		}
+	default:
+		t.Fatalf("unsupported capture method %q", method)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatalf("expected upstream request body to be captured for %s", method)
+	}
+	return seenBody
+}
+
 func TestApplyClaudeToolNameTransformations_RewritesMatchingFields(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"},{"name":"mcp__serena__bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}},{"type":"tool_reference","tool_name":"echo"}]}]}`)
 	rules := sanitizeClaudeToolTransformationsForTest(t, []config.ClaudeToolNameTransformation{
@@ -937,6 +1029,128 @@ func TestApplyClaudeToolNameTransformations_SkipsBuiltinTools(t *testing.T) {
 	}
 	if got := restoreMap["mcp__serena__Read"]; got != "Read" {
 		t.Fatalf("restoreMap[mcp__serena__Read] = %q, want %q", got, "Read")
+	}
+}
+
+func TestApplyClaudeSystemPromptTransformations_AppliesInOrderAndPreservesNonTextBlocks(t *testing.T) {
+	rules := sanitizeClaudeSystemPromptTransformationsForTest(t, []config.ClaudeSystemPromptTransformation{
+		{Pattern: "alpha", Replace: "beta"},
+		{Pattern: "beta", Replace: "gamma"},
+	})
+	input := []byte(`{"system":[{"type":"text","text":"alpha"},{"type":"tool_result","tool_use_id":"t1","content":"keep"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := applyClaudeSystemPromptTransformations(input, rules)
+
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "gamma" {
+		t.Fatalf("system.0.text = %q, want %q", got, "gamma")
+	}
+	if got := gjson.GetBytes(out, "system.1.type").String(); got != "tool_result" {
+		t.Fatalf("system.1.type = %q, want %q", got, "tool_result")
+	}
+	if got := gjson.GetBytes(out, "system.1.tool_use_id").String(); got != "t1" {
+		t.Fatalf("system.1.tool_use_id = %q, want %q", got, "t1")
+	}
+}
+
+func TestApplyClaudeSystemPromptTransformations_RemovesEmptySystemAndSkipsInjectedBlocks(t *testing.T) {
+	rules := sanitizeClaudeSystemPromptTransformationsForTest(t, []config.ClaudeSystemPromptTransformation{
+		{Pattern: `<directories>\n  \n</directories>`},
+	})
+
+	plain := []byte("{\"system\":\"<directories>\\n  \\n</directories>\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+	plainOut := applyClaudeSystemPromptTransformations(plain, rules)
+	if gjson.GetBytes(plainOut, "system").Exists() {
+		t.Fatalf("expected plain system to be removed, got %s", gjson.GetBytes(plainOut, "system").Raw)
+	}
+
+	cloaked := checkSystemInstructionsWithMode(plain, false, nil)
+	cloakedOut := applyClaudeSystemPromptTransformations(cloaked, rules)
+	blocks := gjson.GetBytes(cloakedOut, "system").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("expected cloaked system to keep only injected blocks, got %d", len(blocks))
+	}
+	if !strings.HasPrefix(blocks[0].Get("text").String(), claudeBillingHeaderPrefix) {
+		t.Fatalf("system.0.text = %q, want billing header", blocks[0].Get("text").String())
+	}
+	if blocks[1].Get("text").String() != claudeCodeAgentIdentifierText {
+		t.Fatalf("system.1.text = %q, want %q", blocks[1].Get("text").String(), claudeCodeAgentIdentifierText)
+	}
+}
+
+func TestClaudeExecutor_SystemPromptTransformations_ApplyAcrossRequestPaths(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeProviderConfig{
+			SystemPromptTransformations: []config.ClaudeSystemPromptTransformation{
+				{Pattern: `<directories>\n  \n</directories>`},
+			},
+		},
+	}
+	cfg.SanitizeClaudeProviderConfig()
+
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-system-transform",
+		},
+	}
+	payload := []byte("{\"system\":\"Before <directories>\\n  \\n</directories> after\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+
+	for _, method := range []string{"Execute", "ExecuteStream", "CountTokens"} {
+		body := captureClaudeUpstreamBodyForMethod(t, method, cfg, auth, payload)
+		if got := gjson.GetBytes(body, "system.2.text").String(); got != "Before  after" {
+			t.Fatalf("%s system.2.text = %q, want %q", method, got, "Before  after")
+		}
+	}
+}
+
+func TestClaudeExecutor_SystemPromptTransformations_DoNotAffectClaudeAPIKeys(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeProviderConfig{
+			SystemPromptTransformations: []config.ClaudeSystemPromptTransformation{
+				{Pattern: `<directories>\n  \n</directories>`},
+			},
+		},
+	}
+	cfg.SanitizeClaudeProviderConfig()
+
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-api-system-transform",
+		},
+	}
+	payload := []byte("{\"system\":\"Before <directories>\\n  \\n</directories> after\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+
+	body := captureClaudeUpstreamBodyForMethod(t, "Execute", cfg, auth, payload)
+	if got := gjson.GetBytes(body, "system.2.text").String(); got != "Before <directories>\n  \n</directories> after" {
+		t.Fatalf("system.2.text = %q, want original system prompt", got)
+	}
+}
+
+func TestClaudeExecutor_SystemPromptTransformations_PreserveLiteralAngleBrackets(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeProviderConfig{
+			SystemPromptTransformations: []config.ClaudeSystemPromptTransformation{
+				{Pattern: "alpha", Replace: "beta"},
+			},
+		},
+	}
+	cfg.SanitizeClaudeProviderConfig()
+
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Metadata: map[string]any{
+			"access_token": "sk-ant-oat-system-transform",
+		},
+	}
+	payload := []byte(`{"system":"<Role> alpha","messages":[{"role":"user","content":"hi"}]}`)
+
+	body := captureClaudeUpstreamBodyForMethod(t, "Execute", cfg, auth, payload)
+	if !bytes.Contains(body, []byte(`<Role> beta`)) {
+		t.Fatalf("expected literal angle brackets in upstream body, got %s", string(body))
+	}
+	if bytes.Contains(body, []byte(`\u003cRole\u003e beta`)) {
+		t.Fatalf("expected upstream body to avoid HTML escaping, got %s", string(body))
 	}
 }
 
