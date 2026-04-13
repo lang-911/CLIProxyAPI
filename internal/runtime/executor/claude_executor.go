@@ -77,6 +77,7 @@ var oauthToolRenameReverseMap = func() map[string]string {
 // oauthToolsToRemove lists tool names that must be stripped from OAuth requests
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
+
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const (
@@ -2012,11 +2013,8 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *confi
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
 //
 //	system[0]: billing header (no cache_control)
-//	system[1]: agent identifier (cache_control ephemeral, scope=org)
-//	system[2]: core intro prompt (cache_control ephemeral, scope=global)
-//	system[3]: system instructions (no cache_control)
-//	system[4]: doing tasks (no cache_control)
-//	system[5]: user system messages moved to first user message
+//	system[1]: agent identifier (no cache_control)
+//	system[2..]: user system messages (cache_control added when missing)
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
@@ -2055,46 +2053,24 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		return payload
 	}
 
-	staticPrompt := strings.Join([]string{
-		helps.ClaudeCodeIntro,
-		helps.ClaudeCodeSystem,
-		helps.ClaudeCodeDoingTasks,
-		helps.ClaudeCodeToneAndStyle,
-		helps.ClaudeCodeOutputEfficiency,
-	}, "\n\n")
-	staticBlock := buildTextBlock(staticPrompt, nil)
-
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
-	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
-
-	// Collect user system instructions and prepend to first user message
-	if !strictMode {
-		var userSystemParts []string
-		if system.IsArray() {
-			system.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					txt := strings.TrimSpace(part.Get("text").String())
-					if txt != "" {
-						userSystemParts = append(userSystemParts, txt)
-					}
-				}
+	systemBlocks := []string{billingBlock, agentBlock}
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "text" {
 				return true
-			})
-		} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
-			userSystemParts = append(userSystemParts, strings.TrimSpace(system.String()))
-		}
-
-		if len(userSystemParts) > 0 {
-			combined := strings.Join(userSystemParts, "\n\n")
-			if oauthMode {
-				combined = sanitizeForwardedSystemPrompt(combined)
 			}
-			if strings.TrimSpace(combined) != "" {
-				payload = prependToFirstUserMessage(payload, combined)
+			partJSON := part.Raw
+			if !part.Get("cache_control").Exists() {
+				partJSON = buildTextBlock(part.Get("text").String(), map[string]string{})
 			}
-		}
+			systemBlocks = append(systemBlocks, partJSON)
+			return true
+		})
+	} else if system.Type == gjson.String && system.String() != "" {
+		systemBlocks = append(systemBlocks, buildTextBlock(system.String(), map[string]string{}))
 	}
-
+	systemResult := "[" + strings.Join(systemBlocks, ",") + "]"
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 	return payload
 }
 
@@ -2117,11 +2093,11 @@ Prefer acting on the user's task over describing product-specific workflows.`)
 func buildTextBlock(text string, cacheControl map[string]string) string {
 	block := []byte(`{"type":"text"}`)
 	block, _ = sjson.SetBytes(block, "text", text)
-	if cacheControl != nil && len(cacheControl) > 0 {
+	if cacheControl != nil {
 		// Build cache_control JSON manually to avoid sjson map marshaling issues.
 		// sjson.SetBytes with map[string]string may not produce expected structure.
 		cc := `{"type":"ephemeral"`
-		if t, ok := cacheControl["ttl"]; ok {
+		if t, ok := cacheControl["ttl"]; ok && t != "" {
 			cc += fmt.Sprintf(`,"ttl":"%s"`, t)
 		}
 		cc += "}"
