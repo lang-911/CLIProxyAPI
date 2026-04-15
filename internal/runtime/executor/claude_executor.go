@@ -236,10 +236,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
+	// Auto-inject missing cache_control breakpoints for tools/system/messages.
+	// This stays section-aware, so preexisting breakpoints (including cloaked system[1])
+	// do not suppress injection for other sections.
+	body = ensureCacheControl(body)
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
 	// Cloaking and ensureCacheControl may push the total over 4 when the client
@@ -431,10 +431,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
+	// Auto-inject missing cache_control breakpoints for tools/system/messages.
+	// This stays section-aware, so preexisting breakpoints (including cloaked system[1])
+	// do not suppress injection for other sections.
+	body = ensureCacheControl(body)
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
 	body = enforceCacheControlLimit(body, 4)
@@ -2013,7 +2013,7 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *confi
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
 //
 //	system[0]: billing header (no cache_control)
-//	system[1]: agent identifier (no cache_control)
+//	system[1]: agent identifier (ephemeral cache_control)
 //	system[2..]: user system messages (cache_control added when missing)
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
@@ -2045,8 +2045,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	// Build system blocks matching real Claude Code structure.
 	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
 	// scope='org' in the API request. Only scope='global' is sent explicitly.
-	// The system prompt prefix block is sent without cache_control.
-	agentBlock := buildTextBlock(claudeCodeAgentIdentifierText, nil)
+	// The billing header stays uncached; the Claude Code identifier gets the
+	// standard ephemeral cache_control block.
+	agentBlock := buildTextBlock(claudeCodeAgentIdentifierText, map[string]string{})
 	if strictMode {
 		systemResult := "[" + billingBlock + "," + agentBlock + "]"
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))

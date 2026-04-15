@@ -2766,6 +2766,9 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
 	}
+	if blocks[1].Get("cache_control.type").String() != "ephemeral" {
+		t.Fatalf("blocks[1] should have cache_control.type=ephemeral")
+	}
 	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
 		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
 	}
@@ -2790,6 +2793,12 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
 		t.Fatalf("strict mode should not forward system prompt into messages, got %q", got)
+	}
+	if blocks[1].Get("text").String() != claudeCodeAgentIdentifierText {
+		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
+	}
+	if blocks[1].Get("cache_control.type").String() != "ephemeral" {
+		t.Fatalf("blocks[1] should have cache_control.type=ephemeral")
 	}
 }
 
@@ -2889,6 +2898,97 @@ func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader
 	}
 	if strings.Contains(billingHeader, "cch=00000;") {
 		t.Fatalf("legacy mode should not forward cch placeholder, got %q", billingHeader)
+	}
+}
+
+func TestClaudeExecutor_CloakedRequestKeepsAgentCacheControlAndInjectsToolCacheControl(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"tools": [
+			{"name":"Read","description":"Read file","input_schema":{"type":"object"}},
+			{"name":"Write","description":"Write file","input_schema":{"type":"object"}}
+		],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeAgentIdentifierText {
+		t.Fatalf("system.1.text = %q, want %q", got, claudeCodeAgentIdentifierText)
+	}
+	if got := gjson.GetBytes(seenBody, "system.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.1.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools.1.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if gjson.GetBytes(seenBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should not exist")
+	}
+}
+
+func TestClaudeExecutor_CloakedRequestKeepsAgentCacheControlAndInjectsMessageCacheControl(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"first"}]},
+			{"role":"assistant","content":[{"type":"text","text":"ack"}]},
+			{"role":"user","content":[{"type":"text","text":"second"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "system.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.1.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("messages.0.content.0.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if gjson.GetBytes(seenBody, "messages.2.content.0.cache_control").Exists() {
+		t.Fatalf("last user turn should not have cache_control")
 	}
 }
 
