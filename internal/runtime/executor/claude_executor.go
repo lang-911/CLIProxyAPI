@@ -2165,6 +2165,9 @@ func resolveClaudeSessionIDFromHeaders(ctx context.Context, headers http.Header,
 		if sessionID := strings.TrimSpace(headers.Get("X-Claude-Code-Session-Id")); sessionID != "" {
 			return sessionID, nil
 		}
+		if resolved := helps.OpenCodeStableSessionUUID(headers); resolved != "" {
+			return resolved
+		}
 	}
 	return helps.CachedSessionIDRequired(ctx, apiKey)
 }

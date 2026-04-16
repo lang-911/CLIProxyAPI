@@ -1610,7 +1610,11 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
+		sessionDefault := uuid.NewString()
+		if resolved := helps.OpenCodeStableSessionUUID(ginHeaders); resolved != "" {
+			sessionDefault = resolved
+		}
+		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", sessionDefault)
 	}
 
 	if stream {

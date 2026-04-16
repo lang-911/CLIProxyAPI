@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -151,6 +152,9 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 		return sessionID
 	}
 	if sessionID := strings.TrimSpace(req.Header.Get("Session_id")); sessionID != "" {
+		return sessionID
+	}
+	if sessionID := handlers.ResolveOpenCodeSessionID(req); sessionID != "" {
 		return sessionID
 	}
 	return ""

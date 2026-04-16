@@ -19,6 +19,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -116,6 +117,22 @@ type modelRouterDetector interface {
 
 type modelRouterSkipDetector interface {
 	HasModelRoutersExcept(string) bool
+}
+
+// ResolveOpenCodeSessionID extracts the raw session key from OpenCode request headers.
+// Priority: X-Session-Affinity > X-Parent-Session-Id.
+// Returns empty string when neither header is present.
+func ResolveOpenCodeSessionID(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if affinity := strings.TrimSpace(req.Header.Get("X-Session-Affinity")); affinity != "" {
+		return affinity
+	}
+	if parent := strings.TrimSpace(req.Header.Get("X-Parent-Session-Id")); parent != "" {
+		return parent
+	}
+	return ""
 }
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
@@ -285,6 +302,12 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	} else if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if sessionUUID := helps.OpenCodeStableSessionUUID(ginCtx.Request.Header); sessionUUID != "" {
+				meta[coreexecutor.ExecutionSessionMetadataKey] = sessionUUID
+			}
+		}
 	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
