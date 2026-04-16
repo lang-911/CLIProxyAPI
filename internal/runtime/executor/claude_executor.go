@@ -308,6 +308,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
 		body = applyClaudeSystemPromptTransformations(body, rules)
 	}
+	if reloc := resolvePromptRelocation(e.cfg, apiKey); reloc != nil {
+		prefixLen := claudeInjectedSystemPrefixLength(gjson.GetBytes(body, "system").Array())
+		body = helps.ApplyPromptRelocation(body, reloc, prefixLen)
+	}
 	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
@@ -516,6 +520,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
 		body = applyClaudeSystemPromptTransformations(body, rules)
+	}
+	if reloc := resolvePromptRelocation(e.cfg, apiKey); reloc != nil {
+		prefixLen := claudeInjectedSystemPrefixLength(gjson.GetBytes(body, "system").Array())
+		body = helps.ApplyPromptRelocation(body, reloc, prefixLen)
 	}
 	body = ensureModelMaxTokens(body, baseModel)
 
@@ -1884,6 +1892,16 @@ func claudeInjectedSystemPrefixLength(parts []gjson.Result) int {
 	return 2
 }
 
+func resolvePromptRelocation(cfg *config.Config, apiKey string) *config.PromptRelocationConfig {
+	if cfg == nil || !isClaudeOAuthToken(apiKey) {
+		return nil
+	}
+	if !cfg.Claude.PromptRelocation.Enabled {
+		return nil
+	}
+	return &cfg.Claude.PromptRelocation
+}
+
 func applyClaudeToolNameTransformations(body []byte, rules []config.ClaudeToolNameTransformation) ([]byte, map[string]string) {
 	if len(rules) == 0 {
 		return body, nil
@@ -2787,6 +2805,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 
 	system := gjson.GetBytes(payload, "system")
 	if system.IsArray() {
+		prefixLen := claudeInjectedSystemPrefixLength(system.Array())
 		lastIdx := -1
 		system.ForEach(func(idx, item gjson.Result) bool {
 			if item.Get("cache_control").Exists() {
@@ -2800,7 +2819,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 					return false
 				}
 				i := int(idx.Int())
-				if i == lastIdx {
+				if i < prefixLen || i == lastIdx {
 					return true
 				}
 				if !item.Get("cache_control").Exists() {
