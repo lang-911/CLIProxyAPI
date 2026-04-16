@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -51,7 +52,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	passthroughSessionID := uuid.NewString()
+	passthroughSessionID := helps.OpenCodeStableSessionUUID(c.Request.Header)
+	if passthroughSessionID == "" {
+		passthroughSessionID = uuid.NewString()
+	}
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)

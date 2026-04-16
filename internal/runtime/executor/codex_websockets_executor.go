@@ -874,8 +874,12 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
+	wsSessionDefault := uuid.NewString()
+	if resolved := helps.OpenCodeStableSessionUUID(ginHeaders); resolved != "" {
+		wsSessionDefault = resolved
+	}
 	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-		ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", uuid.NewString())
+		ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", wsSessionDefault)
 	}
 	ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", "")
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
