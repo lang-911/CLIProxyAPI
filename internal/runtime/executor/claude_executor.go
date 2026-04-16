@@ -1830,6 +1830,9 @@ func resolveClaudeSessionIDFromHeaders(headers http.Header, apiKey string) strin
 		if sessionID := strings.TrimSpace(headers.Get("X-Claude-Code-Session-Id")); sessionID != "" {
 			return sessionID
 		}
+		if resolved := helps.OpenCodeStableSessionUUID(headers); resolved != "" {
+			return resolved
+		}
 	}
 	return helps.CachedSessionID(apiKey)
 }

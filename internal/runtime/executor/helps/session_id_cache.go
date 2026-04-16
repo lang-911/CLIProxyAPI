@@ -3,6 +3,8 @@ package helps
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +51,32 @@ func purgeExpiredSessionIDs() {
 func sessionIDCacheKey(apiKey string) string {
 	sum := sha256.Sum256([]byte(apiKey))
 	return hex.EncodeToString(sum[:])
+}
+
+// openCodeSessionUUIDNamespace is a fixed namespace for deterministic UUID v5 generation
+// from OpenCode session identifiers. Do not change: existing mappings depend on it.
+var openCodeSessionUUIDNamespace = uuid.NewSHA1(uuid.NameSpaceDNS, []byte("cliproxyapi.opencode.session"))
+
+// StableSessionUUID maps an arbitrary session key to a deterministic UUID v5.
+// Same input always produces the same UUID across restarts.
+func StableSessionUUID(sessionKey string) string {
+	return uuid.NewSHA1(openCodeSessionUUIDNamespace, []byte(sessionKey)).String()
+}
+
+// OpenCodeStableSessionUUID resolves a stable UUID from OpenCode request headers.
+// Priority: X-Session-Affinity > X-Parent-Session-Id.
+// Returns empty string when neither header is present.
+func OpenCodeStableSessionUUID(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	if affinity := strings.TrimSpace(headers.Get("X-Session-Affinity")); affinity != "" {
+		return StableSessionUUID(affinity)
+	}
+	if parent := strings.TrimSpace(headers.Get("X-Parent-Session-Id")); parent != "" {
+		return StableSessionUUID(parent)
+	}
+	return ""
 }
 
 // CachedSessionID returns a stable session UUID per apiKey, refreshing the TTL on each access.

@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -55,6 +56,22 @@ const (
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
+
+// ResolveOpenCodeSessionID extracts the raw session key from OpenCode request headers.
+// Priority: X-Session-Affinity > X-Parent-Session-Id.
+// Returns empty string when neither header is present.
+func ResolveOpenCodeSessionID(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if affinity := strings.TrimSpace(req.Header.Get("X-Session-Affinity")); affinity != "" {
+		return affinity
+	}
+	if parent := strings.TrimSpace(req.Header.Get("X-Parent-Session-Id")); parent != "" {
+		return parent
+	}
+	return ""
+}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -207,6 +224,12 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	} else if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if sessionUUID := helps.OpenCodeStableSessionUUID(ginCtx.Request.Header); sessionUUID != "" {
+				meta[coreexecutor.ExecutionSessionMetadataKey] = sessionUUID
+			}
+		}
 	}
 	return meta
 }

@@ -837,7 +837,11 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
+	wsSessionDefault := uuid.NewString()
+	if resolved := helps.OpenCodeStableSessionUUID(ginHeaders); resolved != "" {
+		wsSessionDefault = resolved
+	}
+	misc.EnsureHeader(headers, ginHeaders, "Session_id", wsSessionDefault)
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
