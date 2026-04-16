@@ -171,6 +171,27 @@ type ClaudeProviderConfig struct {
 	// SystemPromptTransformations rewrites matching text inside Claude system prompt blocks
 	// before upstream Claude OAuth requests.
 	SystemPromptTransformations []ClaudeSystemPromptTransformation `yaml:"system-prompt-transformations,omitempty" json:"system-prompt-transformations,omitempty"`
+	// PromptRelocation extracts content from system[] blocks (skills XML, project
+	// instructions, user instructions) and re-injects it as <system-reminder> blocks
+	// prepended to the first user message. Only applies to OAuth/file-backed auth requests.
+	PromptRelocation PromptRelocationConfig `yaml:"prompt-relocation,omitempty" json:"prompt-relocation,omitempty"`
+}
+
+// PromptRelocationConfig controls extraction of content from system[] blocks
+// into <system-reminder> blocks prepended to the first user message.
+// This emulates Claude Code's prompt injection architecture where project instructions
+// and skills are delivered as user-role context rather than system-role content.
+type PromptRelocationConfig struct {
+	// Enabled activates prompt relocation for OAuth/file-backed auth requests.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// ExtractSkills extracts <available_skills> XML blocks from the core system prompt entry.
+	ExtractSkills bool `yaml:"extract-skills" json:"extract-skills"`
+	// ExtractProjectInstructions extracts middle system[] entries (indices 1..N-2 after
+	// cloaked prefix) as project-level instructions (AGENTS.md, CLAUDE.md).
+	ExtractProjectInstructions bool `yaml:"extract-project-instructions" json:"extract-project-instructions"`
+	// ExtractUserInstructions extracts the last system[] entry (when 3+ entries exist
+	// after cloaked prefix) as user-level instructions (user.system).
+	ExtractUserInstructions bool `yaml:"extract-user-instructions" json:"extract-user-instructions"`
 }
 
 // ClaudeToolNameTransformation describes how matching custom Claude tool names

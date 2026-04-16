@@ -234,6 +234,11 @@ nonstream-keepalive-interval: 0
 #   system-prompt-transformations:      # optional: regex-based rewrites for Claude OAuth/file-backed auth system prompt text blocks
 #     - pattern: "<directories>\\n  \\n</directories>"
 #       replace: ""
+#   prompt-relocation:                  # optional: relocate content from system[] to user messages as <system-reminder> blocks
+#     enabled: false                    # enable prompt relocation for OAuth/file-backed auth
+#     extract-skills: true              # extract <available_skills> XML blocks from the core system prompt
+#     extract-project-instructions: true  # extract middle system[] entries (AGENTS.md, CLAUDE.md)
+#     extract-user-instructions: true   # extract the last system[] entry as user instructions
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
