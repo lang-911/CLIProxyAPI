@@ -166,8 +166,8 @@ func TestEnsureCacheControl(t *testing.T) {
 		}
 	})
 
-	// Test case 8: Messages caching for multi-turn (second-to-last user)
-	t.Run("Messages Caching Second-To-Last User", func(t *testing.T) {
+	// Test case 8: Messages caching for multi-turn (Bp1 + Bp2)
+	t.Run("Messages Caching Last Two User Turns", func(t *testing.T) {
 		input := []byte(`{
 			"model": "claude-3-5-sonnet",
 			"messages": [
@@ -180,14 +180,38 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`)
 		output := ensureCacheControl(input)
 
-		cacheType := gjson.GetBytes(output, "messages.2.content.0.cache_control.type")
-		if cacheType.String() != "ephemeral" {
-			t.Errorf("cache_control not found on second-to-last user turn. Output: %s", string(output))
+		// Bp2: second-to-last user turn (index 2)
+		bp2 := gjson.GetBytes(output, "messages.2.content.0.cache_control.type")
+		if bp2.String() != "ephemeral" {
+			t.Errorf("Bp2: cache_control not found on second-to-last user turn. Output: %s", string(output))
 		}
 
-		lastUserCache := gjson.GetBytes(output, "messages.4.content.0.cache_control")
-		if lastUserCache.Exists() {
-			t.Errorf("last user turn should NOT have cache_control")
+		// Bp1: last user turn (index 4)
+		bp1 := gjson.GetBytes(output, "messages.4.content.0.cache_control.type")
+		if bp1.String() != "ephemeral" {
+			t.Errorf("Bp1: cache_control not found on last user turn. Output: %s", string(output))
+		}
+
+		// First user turn should NOT have cache_control
+		firstUserCache := gjson.GetBytes(output, "messages.0.content.0.cache_control")
+		if firstUserCache.Exists() {
+			t.Errorf("first user turn should NOT have cache_control")
+		}
+	})
+
+	// Test case 8b: Single-turn conversation gets Bp1
+	t.Run("Messages Caching Single User Turn", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-3-5-sonnet",
+			"messages": [
+				{"role": "user", "content": "Only user message"}
+			]
+		}`)
+		output := ensureCacheControl(input)
+
+		bp1 := gjson.GetBytes(output, "messages.0.content.0.cache_control.type")
+		if bp1.String() != "ephemeral" {
+			t.Errorf("Bp1: cache_control not found on single user turn. Output: %s", string(output))
 		}
 	})
 
