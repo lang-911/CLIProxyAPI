@@ -74,6 +74,68 @@ func newClaudeOAuthTestAuth(accessToken, refreshToken, baseURL string, expiry ti
 	}
 }
 
+type claude401RetryCapture struct {
+	mu          sync.Mutex
+	authHeaders []string
+	bodies      []string
+}
+
+func (c *claude401RetryCapture) record(authHeader, body string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authHeaders = append(c.authHeaders, authHeader)
+	c.bodies = append(c.bodies, body)
+}
+
+func (c *claude401RetryCapture) AuthHeaders() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.authHeaders))
+	copy(out, c.authHeaders)
+	return out
+}
+
+func (c *claude401RetryCapture) Bodies() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.bodies))
+	copy(out, c.bodies)
+	return out
+}
+
+func newClaudeOAuth401RetryTestServer(t *testing.T, staleToken, refreshedToken string, retryFails bool, success func(http.ResponseWriter, *http.Request)) (*httptest.Server, *claude401RetryCapture) {
+	t.Helper()
+
+	capture := &claude401RetryCapture{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		capture.record(r.Header.Get("Authorization"), string(body))
+
+		switch r.Header.Get("Authorization") {
+		case "Bearer " + staleToken:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"stale_token"}`))
+		case "Bearer " + refreshedToken:
+			if retryFails {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"still_unauthorized"}`))
+				return
+			}
+			success(w, r)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unexpected_token"}`))
+		}
+	}))
+	return server, capture
+}
+
 func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
 	t.Helper()
 
@@ -465,6 +527,299 @@ func TestClaudeExecutor_HttpRequest_RefreshesOAuthTokenBeforeSending(t *testing.
 	}
 	if gotAuthorization != "Bearer refreshed-http-token" {
 		t.Fatalf("Authorization = %q, want %q", gotAuthorization, "Bearer refreshed-http-token")
+	}
+}
+
+func TestClaudeExecutor_Execute_RetriesOAuth401AfterForcedRefresh(t *testing.T) {
+	const staleToken = "stale-execute-token"
+	const refreshedToken = "fresh-execute-token"
+
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-execute" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-execute")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  refreshedToken,
+			RefreshToken: "refresh-execute-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	server, capture := newClaudeOAuth401RetryTestServer(t, staleToken, refreshedToken, false, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	})
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth(staleToken, "refresh-execute", server.URL, time.Now().Add(2*time.Hour))
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if got := capture.AuthHeaders(); len(got) != 2 || got[0] != "Bearer "+staleToken || got[1] != "Bearer "+refreshedToken {
+		t.Fatalf("Authorization headers = %v, want stale then refreshed token", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "msg_1" {
+		t.Fatalf("response id = %q, want %q", got, "msg_1")
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_RetriesOAuth401AfterForcedRefresh(t *testing.T) {
+	const staleToken = "stale-stream-token"
+	const refreshedToken = "fresh-stream-token"
+
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-stream" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-stream")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  refreshedToken,
+			RefreshToken: "refresh-stream-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	server, capture := newClaudeOAuth401RetryTestServer(t, staleToken, refreshedToken, false, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(buildClaudeDryRunStreamResponse("claude-3-5-sonnet-20241022", "retry-ok"))
+	})
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth(staleToken, "refresh-stream", server.URL, time.Now().Add(2*time.Hour))
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var stream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("ExecuteStream chunk error = %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+	}
+
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if got := capture.AuthHeaders(); len(got) != 2 || got[0] != "Bearer "+staleToken || got[1] != "Bearer "+refreshedToken {
+		t.Fatalf("Authorization headers = %v, want stale then refreshed token", got)
+	}
+	if !strings.Contains(stream.String(), "message_stop") {
+		t.Fatalf("stream = %q, want message_stop event", stream.String())
+	}
+}
+
+func TestClaudeExecutor_CountTokens_RetriesOAuth401AfterForcedRefresh(t *testing.T) {
+	const staleToken = "stale-count-token"
+	const refreshedToken = "fresh-count-token"
+
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-count" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-count")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  refreshedToken,
+			RefreshToken: "refresh-count-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	server, capture := newClaudeOAuth401RetryTestServer(t, staleToken, refreshedToken, false, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":7}`))
+	})
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth(staleToken, "refresh-count", server.URL, time.Now().Add(2*time.Hour))
+	resp, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if got := capture.AuthHeaders(); len(got) != 2 || got[0] != "Bearer "+staleToken || got[1] != "Bearer "+refreshedToken {
+		t.Fatalf("Authorization headers = %v, want stale then refreshed token", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got != 7 {
+		t.Fatalf("input_tokens = %d, want %d", got, 7)
+	}
+}
+
+func TestClaudeExecutor_HttpRequest_RetriesOAuth401AfterForcedRefresh(t *testing.T) {
+	const staleToken = "stale-http-retry-token"
+	const refreshedToken = "fresh-http-retry-token"
+
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-http-retry" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-http-retry")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  refreshedToken,
+			RefreshToken: "refresh-http-retry-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	server, capture := newClaudeOAuth401RetryTestServer(t, staleToken, refreshedToken, false, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth(staleToken, "refresh-http-retry", "", time.Now().Add(2*time.Hour))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader("ping"))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	resp, err := executor.HttpRequest(context.Background(), auth, req)
+	if err != nil {
+		t.Fatalf("HttpRequest() error = %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("response close error = %v", err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if got := capture.AuthHeaders(); len(got) != 2 || got[0] != "Bearer "+staleToken || got[1] != "Bearer "+refreshedToken {
+		t.Fatalf("Authorization headers = %v, want stale then refreshed token", got)
+	}
+	if got := capture.Bodies(); len(got) != 2 || got[0] != "ping" || got[1] != "ping" {
+		t.Fatalf("request bodies = %v, want repeated body payload", got)
+	}
+}
+
+func TestClaudeExecutor_Execute_DoesNotRetryOAuth401ForAPIKeyAuth(t *testing.T) {
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		return nil, nil
+	})
+
+	var (
+		mu          sync.Mutex
+		authHeaders []string
+		callCount   int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callCount++
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "api-key-123",
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"refresh_token": "refresh-ignored",
+			"expired":       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 401")
+	}
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok || statusProvider.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("Execute() status = %v, want %d", err, http.StatusUnauthorized)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 0)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if callCount != 1 {
+		t.Fatalf("callCount = %d, want %d", callCount, 1)
+	}
+	if len(authHeaders) != 1 || authHeaders[0] != "Bearer api-key-123" {
+		t.Fatalf("Authorization headers = %v, want single api key attempt", authHeaders)
+	}
+}
+
+func TestClaudeExecutor_Execute_PropagatesRepeatedOAuth401AfterSingleRetry(t *testing.T) {
+	const staleToken = "stale-fail-token"
+	const refreshedToken = "fresh-fail-token"
+
+	refreshCalls := 0
+	stubClaudeRefreshTokens(t, func(ctx context.Context, cfg *config.Config, refreshToken string) (*claudeauth.ClaudeTokenData, error) {
+		refreshCalls++
+		if refreshToken != "refresh-fail" {
+			t.Fatalf("refreshToken = %q, want %q", refreshToken, "refresh-fail")
+		}
+		return &claudeauth.ClaudeTokenData{
+			AccessToken:  refreshedToken,
+			RefreshToken: "refresh-fail-2",
+			Email:        "user@example.com",
+			Expire:       time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		}, nil
+	})
+
+	server, capture := newClaudeOAuth401RetryTestServer(t, staleToken, refreshedToken, true, func(w http.ResponseWriter, r *http.Request) {})
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := newClaudeOAuthTestAuth(staleToken, "refresh-fail", server.URL, time.Now().Add(2*time.Hour))
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 401")
+	}
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok || statusProvider.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("Execute() status = %v, want %d", err, http.StatusUnauthorized)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want %d", refreshCalls, 1)
+	}
+	if got := capture.AuthHeaders(); len(got) != 2 || got[0] != "Bearer "+staleToken || got[1] != "Bearer "+refreshedToken {
+		t.Fatalf("Authorization headers = %v, want stale then refreshed token", got)
 	}
 }
 
