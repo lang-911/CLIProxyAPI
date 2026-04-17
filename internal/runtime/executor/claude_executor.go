@@ -2579,19 +2579,20 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	return payload
 }
 
-// injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.
-// Per Anthropic docs: "Place cache_control on the second-to-last User message to let the model reuse the earlier cache."
-// This enables caching of conversation history, which is especially beneficial for long multi-turn conversations.
-// Only adds cache_control if:
-// - There are at least 2 user turns in the conversation
-// - No message content already has cache_control
+// injectMessagesCacheControl adds cache_control breakpoints to user messages for multi-turn caching.
+// It marks two breakpoints following the Anthropic-recommended dual-anchor pattern:
+//   - Bp1: the LAST user message — primary breakpoint, caches the longest prefix for maximum savings.
+//   - Bp2: the SECOND-TO-LAST user message — fallback anchor that guarantees a cache hit when
+//     the conversation grows by more than 20 blocks between turns (Anthropic's lookback window).
+//
+// For single-turn conversations (1 user message), only Bp1 is injected.
+// Only adds cache_control if no message content already has it.
 func injectMessagesCacheControl(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
 	}
 
-	// Check if ANY message content already has cache_control
 	hasCacheControlInMessages := false
 	messages.ForEach(func(_, msg gjson.Result) bool {
 		content := msg.Get("content")
@@ -2610,7 +2611,6 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		return payload
 	}
 
-	// Find all user message indices
 	var userMsgIndices []int
 	messages.ForEach(func(index gjson.Result, msg gjson.Result) bool {
 		if msg.Get("role").String() == "user" {
@@ -2619,40 +2619,46 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		return true
 	})
 
-	// Need at least 2 user turns to cache the second-to-last
-	if len(userMsgIndices) < 2 {
+	if len(userMsgIndices) < 1 {
 		return payload
 	}
 
-	// Get the second-to-last user message index
-	secondToLastUserIdx := userMsgIndices[len(userMsgIndices)-2]
+	// Bp1: last user message (primary breakpoint).
+	lastUserIdx := userMsgIndices[len(userMsgIndices)-1]
+	payload = injectCacheControlAtMessage(payload, lastUserIdx)
 
-	// Get the content of this message
-	contentPath := fmt.Sprintf("messages.%d.content", secondToLastUserIdx)
+	// Bp2: second-to-last user message (20-block walkback safety net).
+	if len(userMsgIndices) >= 2 {
+		secondToLastUserIdx := userMsgIndices[len(userMsgIndices)-2]
+		payload = injectCacheControlAtMessage(payload, secondToLastUserIdx)
+	}
+
+	return payload
+}
+
+// injectCacheControlAtMessage adds cache_control to the last content block of the
+// message at the given index. String content is promoted to an array block.
+func injectCacheControlAtMessage(payload []byte, msgIdx int) []byte {
+	contentPath := fmt.Sprintf("messages.%d.content", msgIdx)
 	content := gjson.GetBytes(payload, contentPath)
 
 	if content.IsArray() {
-		// Add cache_control to the last content block of this message
 		contentCount := int(content.Get("#").Int())
 		if contentCount > 0 {
-			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
+			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", msgIdx, contentCount-1)
 			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
 				return payload
 			}
-			payload = result
+			return result
 		}
 	} else if content.Type == gjson.String {
-		// Convert string content to array with cache_control
-		text := content.String()
 		newContent := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          content.String(),
+				"cache_control": map[string]string{"type": "ephemeral"},
 			},
 		}
 		result, err := sjson.SetBytes(payload, contentPath, newContent)
@@ -2660,7 +2666,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			log.Warnf("failed to inject cache_control into message string content: %v", err)
 			return payload
 		}
-		payload = result
+		return result
 	}
 
 	return payload

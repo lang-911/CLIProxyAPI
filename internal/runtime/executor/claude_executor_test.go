@@ -2987,8 +2987,8 @@ func TestClaudeExecutor_CloakedRequestKeepsAgentCacheControlAndInjectsMessageCac
 	if got := gjson.GetBytes(seenBody, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("messages.0.content.0.cache_control.type = %q, want %q", got, "ephemeral")
 	}
-	if gjson.GetBytes(seenBody, "messages.2.content.0.cache_control").Exists() {
-		t.Fatalf("last user turn should not have cache_control")
+	if got := gjson.GetBytes(seenBody, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("messages.2.content.0.cache_control.type = %q, want %q (Bp1: last user turn)", got, "ephemeral")
 	}
 }
 
