@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -1207,11 +1206,6 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func claudeModelSupports1MContext(baseModel string) bool {
-	modelInfo := registry.LookupModelInfo(strings.TrimSpace(baseModel), "claude")
-	return modelInfo != nil && modelInfo.ContextLength >= 1_000_000
-}
-
 func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
@@ -1253,15 +1247,8 @@ func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Au
 		baseBetas += ",interleaved-thinking-2025-05-14"
 	}
 
-	enableClaude1MBeta := false
-	if ginHeaders != nil {
-		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
-			enableClaude1MBeta = claudeModelSupports1MContext(baseModel)
-		}
-	}
-
-	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 || enableClaude1MBeta {
+	// Merge extra betas from request body.
+	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
@@ -1275,9 +1262,6 @@ func applyClaudeHeaders(r *http.Request, baseModel string, auth *cliproxyauth.Au
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
-		}
-		if enableClaude1MBeta && !existingSet["context-1m-2025-08-07"] {
-			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)

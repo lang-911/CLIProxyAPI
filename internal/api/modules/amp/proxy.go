@@ -92,9 +92,8 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 			// Could generate one here if needed
 		}
 
-		// Note: We do NOT filter Anthropic-Beta headers in the proxy path
-		// Users going through ampcode.com proxy are paying for the service and should get all features
-		// including 1M context window (context-1m-2025-08-07)
+		// Note: We do NOT filter Anthropic-Beta headers in the proxy path.
+		// Users going through ampcode.com proxy are paying for the service and should get upstream-supported features.
 
 		// Inject API key from secret source (only uses upstream-api-key from config)
 		if key, err := secretSource.Get(req.Context()); err == nil && key != "" {
