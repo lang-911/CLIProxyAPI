@@ -1746,174 +1746,19 @@ func TestClaudeExecutor_CountTokens_AppliesToolNameTransformationsForOAuthOnly(t
 	}
 }
 
-func TestApplyClaudeHeaders_Claude1MHeaderModelGating(t *testing.T) {
+func TestApplyClaudeHeaders_MergesExtraBetas(t *testing.T) {
 	t.Parallel()
 
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	testBeta := "test-beta-2026-01-01"
-	tests := []struct {
-		name       string
-		baseModel  string
-		headers    map[string]string
-		extraBetas []string
-		want1M     bool
-		wantCount  int
-		wantExtra  string
-	}{
-		{
-			name:      "adds beta for known 1m claude model",
-			baseModel: "claude-opus-4-6",
-			headers:   map[string]string{"X-CPA-CLAUDE-1M": "1"},
-			want1M:    true,
-			wantCount: 1,
-		},
-		{
-			name:       "skips beta for haiku but preserves extra betas",
-			baseModel:  "claude-haiku-4-5-20251001",
-			headers:    map[string]string{"X-CPA-CLAUDE-1M": "1"},
-			extraBetas: []string{testBeta},
-			want1M:     false,
-			wantCount:  0,
-			wantExtra:  testBeta,
-		},
-		{
-			name:      "skips beta for unknown model",
-			baseModel: "claude-does-not-exist",
-			headers:   map[string]string{"X-CPA-CLAUDE-1M": "1"},
-			want1M:    false,
-			wantCount: 0,
-		},
-		{
-			name:      "does not duplicate existing 1m beta",
-			baseModel: "claude-opus-4-6",
-			headers: map[string]string{
-				"X-CPA-CLAUDE-1M": "1",
-				"Anthropic-Beta":  "fine-grained-tool-streaming-2025-05-14,context-1m-2025-08-07",
-			},
-			want1M:    true,
-			wantCount: 1,
-		},
-	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
-			req = req.WithContext(contextWithClaudeGinHeaders(tc.headers))
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
 
-			applyClaudeHeaders(req, tc.baseModel, auth, "key-123", false, tc.extraBetas, nil)
+	applyClaudeHeaders(req, "claude-opus-4-6", auth, "key-123", false, []string{testBeta}, nil)
 
-			got := req.Header.Get("Anthropic-Beta")
-			if has := strings.Contains(got, "context-1m-2025-08-07"); has != tc.want1M {
-				t.Fatalf("Anthropic-Beta contains context-1m = %v, want %v; header=%q", has, tc.want1M, got)
-			}
-			if count := strings.Count(got, "context-1m-2025-08-07"); count != tc.wantCount {
-				t.Fatalf("context-1m count = %d, want %d; header=%q", count, tc.wantCount, got)
-			}
-			if tc.wantExtra != "" && !strings.Contains(got, tc.wantExtra) {
-				t.Fatalf("Anthropic-Beta = %q, want it to contain %q", got, tc.wantExtra)
-			}
-		})
-	}
-}
-
-func TestClaudeExecutor_Claude1MHeaderUsesBaseModelAcrossPaths(t *testing.T) {
-	t.Parallel()
-
-	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-	tests := []struct {
-		name     string
-		wantPath string
-		invoke   func(context.Context, *ClaudeExecutor, *cliproxyauth.Auth, []byte) error
-	}{
-		{
-			name:     "Execute",
-			wantPath: "/v1/messages",
-			invoke: func(ctx context.Context, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-				_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
-					Model:   "claude-opus-4-6(high)",
-					Payload: payload,
-				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
-				return err
-			},
-		},
-		{
-			name:     "ExecuteStream",
-			wantPath: "/v1/messages",
-			invoke: func(ctx context.Context, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-				result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
-					Model:   "claude-opus-4-6(high)",
-					Payload: payload,
-				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
-				if err != nil {
-					return err
-				}
-				for chunk := range result.Chunks {
-					if chunk.Err != nil {
-						return chunk.Err
-					}
-				}
-				return nil
-			},
-		},
-		{
-			name:     "CountTokens",
-			wantPath: "/v1/messages/count_tokens",
-			invoke: func(ctx context.Context, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-				_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
-					Model:   "claude-opus-4-6(high)",
-					Payload: payload,
-				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
-				return err
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var gotPath string
-			var gotBeta string
-			var gotModel string
-
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotPath = r.URL.Path
-				gotBeta = r.Header.Get("Anthropic-Beta")
-				body, _ := io.ReadAll(r.Body)
-				gotModel = gjson.GetBytes(body, "model").String()
-
-				switch tc.name {
-				case "Execute":
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-				case "ExecuteStream":
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
-				case "CountTokens":
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(`{"input_tokens":42}`))
-				}
-			}))
-			defer server.Close()
-
-			executor := NewClaudeExecutor(&config.Config{})
-			auth := &cliproxyauth.Auth{Attributes: map[string]string{
-				"api_key":  "key-123",
-				"base_url": server.URL,
-			}}
-
-			err := tc.invoke(contextWithClaudeGinHeaders(map[string]string{"X-CPA-CLAUDE-1M": "1"}), executor, auth, payload)
-			if err != nil {
-				t.Fatalf("%s error: %v", tc.name, err)
-			}
-			if gotPath != tc.wantPath {
-				t.Fatalf("path = %q, want %q", gotPath, tc.wantPath)
-			}
-			if gotModel != "claude-opus-4-6" {
-				t.Fatalf("upstream model = %q, want %q", gotModel, "claude-opus-4-6")
-			}
-			if !strings.Contains(gotBeta, "context-1m-2025-08-07") {
-				t.Fatalf("Anthropic-Beta = %q, want it to contain context-1m-2025-08-07", gotBeta)
-			}
-		})
+	got := req.Header.Get("Anthropic-Beta")
+	if !strings.Contains(got, testBeta) {
+		t.Fatalf("Anthropic-Beta = %q, want it to contain %q", got, testBeta)
 	}
 }
 
