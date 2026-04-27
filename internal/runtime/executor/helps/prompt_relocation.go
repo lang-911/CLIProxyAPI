@@ -184,9 +184,37 @@ func prependRemindersToFirstUserMessage(body []byte, reminders []string) []byte 
 		return body
 	}
 
+	msgArray := messages.Array()
+	if len(msgArray) == 0 {
+		return body
+	}
+
 	reminderBlocks := make([]string, len(reminders))
 	for i, r := range reminders {
 		reminderBlocks[i] = string(buildTextBlock(r))
+	}
+
+	// When messages[0] is assistant (post-compaction mid-tool-loop), the first
+	// user message is the tool_result turn answering that assistant's tool_use.
+	// Anthropic requires tool_result blocks to be the first content in that turn,
+	// and inserting any text before them triggers a 400. Following the LiteLLM
+	// precedent, prepend a synthetic user message carrying the reminders instead
+	// of mutating an existing tool_result-bearing turn.
+	if msgArray[0].Get("role").String() == "assistant" {
+		synthMsg := `{"role":"user","content":[` + strings.Join(reminderBlocks, ",") + `]}`
+		existingRaw := messages.Raw
+		inner := existingRaw[1 : len(existingRaw)-1]
+		var newMsgs string
+		if len(strings.TrimSpace(inner)) == 0 {
+			newMsgs = "[" + synthMsg + "]"
+		} else {
+			newMsgs = "[" + synthMsg + "," + inner + "]"
+		}
+		result, err := sjson.SetRawBytes(body, "messages", []byte(newMsgs))
+		if err != nil {
+			return body
+		}
+		return result
 	}
 
 	updatedBody := body
@@ -211,12 +239,23 @@ func prependRemindersToFirstUserMessage(body []byte, reminders []string) []byte 
 			updated = true
 			return false
 		case content.IsArray():
-			parts := make([]string, 0, len(reminderBlocks)+len(content.Array()))
-			parts = append(parts, reminderBlocks...)
 			existing := content.Array()
-			for j, block := range existing {
-				raw := block.Raw
-				if j == len(existing)-1 && !block.Get("cache_control").Exists() {
+			leadingToolResultEnd := 0
+			for leadingToolResultEnd < len(existing) {
+				if existing[leadingToolResultEnd].Get("type").String() != "tool_result" {
+					break
+				}
+				leadingToolResultEnd++
+			}
+
+			parts := make([]string, 0, len(reminderBlocks)+len(existing))
+			for j := 0; j < leadingToolResultEnd; j++ {
+				parts = append(parts, existing[j].Raw)
+			}
+			parts = append(parts, reminderBlocks...)
+			for j := leadingToolResultEnd; j < len(existing); j++ {
+				raw := existing[j].Raw
+				if j == len(existing)-1 && !existing[j].Get("cache_control").Exists() {
 					if b, err := sjson.SetRawBytes([]byte(raw), "cache_control", []byte(`{"type":"ephemeral"}`)); err == nil {
 						raw = string(b)
 					}
