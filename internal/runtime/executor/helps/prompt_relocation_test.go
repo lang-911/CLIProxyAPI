@@ -65,11 +65,11 @@ func TestPromptRelocation(t *testing.T) {
 		if strings.Contains(coreText, "<available_skills") {
 			t.Fatalf("core text still contains skills block: %q", coreText)
 		}
-		skillsBlock := gjson.GetBytes(got, "messages.1.content.0.text").String()
+		skillsBlock := gjson.GetBytes(got, "messages.0.content.0.text").String()
 		if !strings.Contains(skillsBlock, "<skill><name>bit-cli</name><description>CLI reference</description></skill>") {
 			t.Fatalf("skills block missing skills xml: %q", skillsBlock)
 		}
-		instrBlock := gjson.GetBytes(got, "messages.1.content.1.text").String()
+		instrBlock := gjson.GetBytes(got, "messages.0.content.1.text").String()
 		if !strings.Contains(instrBlock, "# claudeMd") {
 			t.Fatalf("instructions block missing claudeMd section: %q", instrBlock)
 		}
@@ -93,7 +93,7 @@ func TestPromptRelocation(t *testing.T) {
 		if strings.Contains(coreText, "<available_skills") {
 			t.Fatalf("core text still contains skills block: %q", coreText)
 		}
-		reminder := gjson.GetBytes(got, "messages.1.content.0.text").String()
+		reminder := gjson.GetBytes(got, "messages.0.content.0.text").String()
 		if !strings.Contains(reminder, "The following skills are available") {
 			t.Fatalf("reminder missing skills section: %q", reminder)
 		}
@@ -110,7 +110,7 @@ func TestPromptRelocation(t *testing.T) {
 		if len(gjson.GetBytes(got, "system").Array()) != 2 {
 			t.Fatalf("system length = %d, want 2", len(gjson.GetBytes(got, "system").Array()))
 		}
-		reminder := gjson.GetBytes(got, "messages.1.content.0.text").String()
+		reminder := gjson.GetBytes(got, "messages.0.content.0.text").String()
 		if !strings.Contains(reminder, "# claudeMd") {
 			t.Fatalf("reminder missing claudeMd section: %q", reminder)
 		}
@@ -127,7 +127,7 @@ func TestPromptRelocation(t *testing.T) {
 		if len(gjson.GetBytes(got, "system").Array()) != 3 {
 			t.Fatalf("system length = %d, want 3", len(gjson.GetBytes(got, "system").Array()))
 		}
-		reminder := gjson.GetBytes(got, "messages.1.content.0.text").String()
+		reminder := gjson.GetBytes(got, "messages.0.content.0.text").String()
 		if !strings.Contains(reminder, "# userInstructions") {
 			t.Fatalf("reminder missing userInstructions section: %q", reminder)
 		}
@@ -244,7 +244,7 @@ func TestPromptRelocation(t *testing.T) {
 
 		got := ApplyPromptRelocation(body, cfg, 0)
 		wantDate := time.Now().Format("2006-01-02")
-		reminder := gjson.GetBytes(got, "messages.1.content.0.text").String()
+		reminder := gjson.GetBytes(got, "messages.0.content.0.text").String()
 		if !strings.Contains(reminder, wantDate) {
 			t.Fatalf("reminder missing current date %q: %q", wantDate, reminder)
 		}
@@ -287,7 +287,7 @@ func TestApplyPromptRelocation_NoUnicodeEscaping(t *testing.T) {
 	if strings.Contains(outStr, `\u003c`) || strings.Contains(outStr, `\u003e`) {
 		t.Fatal("output contains unicode-escaped angle brackets; expected literal < and >")
 	}
-	reminder := gjson.GetBytes(out, "messages.1.content.0.text").String()
+	reminder := gjson.GetBytes(out, "messages.0.content.0.text").String()
 	if !strings.Contains(reminder, "<system-reminder>") {
 		t.Fatalf("expected literal <system-reminder> tag in reminder, got: %s", reminder[:200])
 	}
@@ -377,4 +377,144 @@ func basePromptRelocationBody() []byte {
 			{"role":"user","content":[{"type":"text","text":"Please help"}]}
 		]
 	}`)
+}
+
+func TestApplyPromptRelocation_PreservesLeadingToolResultBlocks(t *testing.T) {
+	cfg := &config.PromptRelocationConfig{Enabled: true, ExtractSkills: true, ExtractProjectInstructions: true, ExtractUserInstructions: true}
+	body := []byte(`{
+		"system":[
+			{"type":"text","text":"You are Claude Code.\n<available_skills><skill><name>bit-cli</name><description>CLI reference</description></skill></available_skills>","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"Project instruction one."},
+			"Project instruction two.",
+			{"type":"text","text":"User instruction here."}
+		],
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"toolu_01","name":"Read","input":{"path":"/a"}},
+				{"type":"tool_use","id":"toolu_02","name":"Read","input":{"path":"/b"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"},
+				{"type":"tool_result","tool_use_id":"toolu_02","content":"ok"},
+				{"type":"text","text":"Trailing user text."}
+			]}
+		]
+	}`)
+
+	out := ApplyPromptRelocation(body, cfg, 0)
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages (synthetic + original 2), got %d", len(msgs))
+	}
+	if msgs[0].Get("role").String() != "user" {
+		t.Fatalf("synthetic message role = %q, want user", msgs[0].Get("role").String())
+	}
+	synthContent := msgs[0].Get("content").Array()
+	if !strings.Contains(synthContent[0].Get("text").String(), "The following skills are available") {
+		t.Fatalf("synthetic message missing skills reminder: %s", synthContent[0].Raw)
+	}
+	if !strings.Contains(synthContent[1].Get("text").String(), "# claudeMd") {
+		t.Fatalf("synthetic message missing instructions reminder: %s", synthContent[1].Raw)
+	}
+	if msgs[1].Get("role").String() != "assistant" {
+		t.Fatalf("original assistant message moved to index 1")
+	}
+	userContent := msgs[2].Get("content").Array()
+	if userContent[0].Get("type").String() != "tool_result" || userContent[0].Get("tool_use_id").String() != "toolu_01" {
+		t.Fatalf("user content[0] = %s, want first tool_result toolu_01", userContent[0].Raw)
+	}
+	if userContent[1].Get("type").String() != "tool_result" || userContent[1].Get("tool_use_id").String() != "toolu_02" {
+		t.Fatalf("user content[1] = %s, want second tool_result toolu_02", userContent[1].Raw)
+	}
+	if userContent[2].Get("text").String() != "Trailing user text." {
+		t.Fatalf("trailing user text not preserved: %s", userContent[2].Raw)
+	}
+}
+
+func TestApplyPromptRelocation_AllToolResultsNoTrailingText(t *testing.T) {
+	cfg := &config.PromptRelocationConfig{Enabled: true, ExtractSkills: true}
+	body := []byte(`{
+		"system":[
+			{"type":"text","text":"You are Claude Code.\n<available_skills><skill><name>bit-cli</name></skill></available_skills>"}
+		],
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Read","input":{}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"}
+			]}
+		]
+	}`)
+
+	out := ApplyPromptRelocation(body, cfg, 0)
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages (synthetic + original 2), got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Get("content.0.text").String(), "The following skills are available") {
+		t.Fatalf("synthetic message missing skills reminder: %s", msgs[0].Raw)
+	}
+	if msgs[2].Get("content.0.type").String() != "tool_result" {
+		t.Fatalf("tool_result in original user message must remain untouched: %s", msgs[2].Raw)
+	}
+}
+
+func TestApplyPromptRelocation_SyntheticUserMessageStructure(t *testing.T) {
+	cfg := &config.PromptRelocationConfig{Enabled: true, ExtractSkills: true, ExtractProjectInstructions: true}
+	body := []byte(`{
+		"system":[
+			{"type":"text","text":"You are Claude Code.\n<available_skills><skill><name>bit-cli</name></skill></available_skills>\nInstructions from: /path/AGENTS.md\n# Repo\nFollow conventions."},
+			{"type":"text","text":"User instruction."}
+		],
+		"messages":[
+			{"role":"assistant","content":[{"type":"text","text":"done"}]},
+			{"role":"user","content":"What next?"}
+		]
+	}`)
+
+	out := ApplyPromptRelocation(body, cfg, 0)
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages (synthetic + original 2), got %d", len(msgs))
+	}
+	if msgs[0].Get("role").String() != "user" {
+		t.Fatalf("synthetic message role = %q, want user", msgs[0].Get("role").String())
+	}
+	synthBlocks := msgs[0].Get("content").Array()
+	if !strings.Contains(synthBlocks[0].Get("text").String(), "bit-cli") {
+		t.Fatalf("synthetic content[0] missing skills: %s", synthBlocks[0].Raw)
+	}
+	if !strings.Contains(synthBlocks[1].Get("text").String(), "# claudeMd") {
+		t.Fatalf("synthetic content[1] missing instructions: %s", synthBlocks[1].Raw)
+	}
+	if msgs[1].Get("role").String() != "assistant" {
+		t.Fatalf("original assistant at index 1, got %q", msgs[1].Get("role").String())
+	}
+	if msgs[2].Get("content").String() != "What next?" {
+		t.Fatalf("original user message at index 2 should be unchanged: %s", msgs[2].Raw)
+	}
+}
+
+func TestApplyPromptRelocation_NonToolResultLeadingBlockUnchanged(t *testing.T) {
+	cfg := &config.PromptRelocationConfig{Enabled: true, ExtractSkills: true}
+	body := []byte(`{
+		"system":[
+			{"type":"text","text":"You are Claude Code.\n<available_skills><skill><name>bit-cli</name></skill></available_skills>"}
+		],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"Original first text"}]}
+		]
+	}`)
+
+	out := ApplyPromptRelocation(body, cfg, 0)
+
+	contentArr := gjson.GetBytes(out, "messages.0.content").Array()
+	if !strings.Contains(contentArr[0].Get("text").String(), "The following skills are available") {
+		t.Fatalf("skills reminder should be first when no tool_result leads, got: %s", contentArr[0].Raw)
+	}
+	if contentArr[len(contentArr)-1].Get("text").String() != "Original first text" {
+		t.Fatalf("original text should remain last: %s", contentArr[len(contentArr)-1].Raw)
+	}
 }
