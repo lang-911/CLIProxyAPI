@@ -26,6 +26,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// assistantPrefillRejectionMessage mirrors the wording Anthropic returns for
+// models that disallow assistant message prefill. Clients (e.g. SDKs that
+// surface upstream errors verbatim) may pattern-match on it, so keep it stable.
+const assistantPrefillRejectionMessage = "This model does not support assistant message prefill. The conversation must end with a user message."
+
+// claudeMessagesEndsWithAssistant reports whether the request's messages array
+// terminates with a role=assistant turn. Tolerates missing/non-array messages
+// (caller will surface a structural error from upstream if it matters).
+func claudeMessagesEndsWithAssistant(rawJSON []byte) bool {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	arr := messages.Array()
+	if len(arr) == 0 {
+		return false
+	}
+	return arr[len(arr)-1].Get("role").String() == "assistant"
+}
+
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type ClaudeCodeAPIHandler struct {
@@ -72,6 +92,27 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// Pre-flight guard: short-circuit any /v1/messages conversation that ends
+	// with role=assistant. Anthropic rejects this for some models (notably the
+	// extended-thinking Opus 4 family) with a 400 invalid_request_error, but
+	// even on models that accept it the proxy treats it as malformed input to
+	// avoid silently consuming OAuth quota on a request the caller almost
+	// certainly did not intend. Replaying Anthropic's exact wording keeps SDKs
+	// that pattern-match on the message working.
+	if claudeMessagesEndsWithAssistant(rawJSON) {
+		log.WithFields(log.Fields{
+			"model":  gjson.GetBytes(rawJSON, "model").String(),
+			"reason": "trailing_assistant_message",
+		}).Warn("rejecting /v1/messages locally: conversation ends with role=assistant")
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: assistantPrefillRejectionMessage,
 				Type:    "invalid_request_error",
 			},
 		})
