@@ -20,28 +20,47 @@ to_go_arch() {
 }
 
 FORCE_LINUX=0
+CUSTOM_ARCH=""
 VERSION="${VERSION:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --linux)
       FORCE_LINUX=1
       ;;
+    --arch)
+      if [ "$#" -lt 2 ]; then
+        echo "--arch requires a value"
+        echo "Usage: ./build.sh <version> [--linux] [--arch <arch>]"
+        exit 1
+      fi
+      CUSTOM_ARCH="$2"
+      shift
+      ;;
+    --arch=*)
+      CUSTOM_ARCH="${1#--arch=}"
+      if [ -z "${CUSTOM_ARCH}" ]; then
+        echo "--arch requires a value"
+        echo "Usage: ./build.sh <version> [--linux] [--arch <arch>]"
+        exit 1
+      fi
+      ;;
     -h|--help)
-      echo "Usage: ./build.sh <version> [--linux]"
+      echo "Usage: ./build.sh <version> [--linux] [--arch <arch>]"
       echo "  <version>: release version embedded in the binary name and ldflags"
       echo "  Default: build for current OS/arch"
       echo "  --linux: force Linux build for current arch"
+      echo "  --arch <arch>: target Go architecture (e.g. amd64, arm64, 386, arm)"
       exit 0
       ;;
     -*)
       echo "Unknown option: $1"
-      echo "Usage: ./build.sh <version> [--linux]"
+      echo "Usage: ./build.sh <version> [--linux] [--arch <arch>]"
       exit 1
       ;;
     *)
       if [ -n "${VERSION}" ]; then
         echo "Unexpected argument: $1"
-        echo "Usage: ./build.sh <version> [--linux]"
+        echo "Usage: ./build.sh <version> [--linux] [--arch <arch>]"
         exit 1
       fi
       VERSION="$1"
@@ -52,7 +71,7 @@ done
 
 if [ -z "${VERSION}" ]; then
   echo "VERSION argument is required"
-  echo "Usage: ./build.sh <version> [--linux]"
+  echo "Usage: ./build.sh <version> [--linux] [--arch <arch>]"
   exit 1
 fi
 
@@ -69,6 +88,10 @@ TARGET_ARCH="${TARGET_ARCH:-${HOST_ARCH}}"
 
 if [ "${FORCE_LINUX}" -eq 1 ]; then
   TARGET_OS="linux"
+fi
+
+if [ -n "${CUSTOM_ARCH}" ]; then
+  TARGET_ARCH="${CUSTOM_ARCH}"
 fi
 
 OUTPUT_NAME="cli-proxy-api_${VERSION}_${TARGET_OS}_${TARGET_ARCH}"
