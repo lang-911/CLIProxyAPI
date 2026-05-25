@@ -376,7 +376,7 @@ func (e *GeminiVertexExecutor) executeWithBearerToken(ctx context.Context, auth 
 		requestPath := helps.PayloadRequestPath(opts)
 		body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 		body, _ = sjson.SetBytes(body, "model", baseModel)
-		body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
+		body = helps.StripGeminiUnsupportedFunctionIDs(body)
 	}
 
 	action := getVertexAction(baseModel, false)
@@ -514,7 +514,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
+	body = helps.StripGeminiUnsupportedFunctionIDs(body)
 
 	action := getVertexAction(baseModel, false)
 	if req.Metadata != nil {
@@ -628,7 +628,7 @@ func (e *GeminiVertexExecutor) executeStreamWithBearerToken(ctx context.Context,
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
+	body = helps.StripGeminiUnsupportedFunctionIDs(body)
 
 	action := getVertexAction(baseModel, true)
 	baseURL := vertexBaseURL(location)
@@ -786,7 +786,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
+	body = helps.StripGeminiUnsupportedFunctionIDs(body)
 
 	action := getVertexAction(baseModel, true)
 	// For API key auth, use simpler URL format without project/location
@@ -918,7 +918,7 @@ func (e *GeminiVertexExecutor) countTokensWithBearerToken(ctx context.Context, a
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
-	translatedReq = helps.StripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
+	translatedReq = helps.StripGeminiUnsupportedFunctionIDs(translatedReq)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
@@ -1022,7 +1022,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
-	translatedReq = helps.StripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
+	translatedReq = helps.StripGeminiUnsupportedFunctionIDs(translatedReq)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
