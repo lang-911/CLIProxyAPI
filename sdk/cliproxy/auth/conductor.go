@@ -157,6 +157,75 @@ func nextTransientErrorRetryAfter(now time.Time) time.Time {
 	return now.Add(time.Duration(seconds) * time.Second)
 }
 
+// upstream5xxSuspendThreshold stores the consecutive 5xx error count before an auth is
+// persistently suspended. Zero disables the feature.
+var upstream5xxSuspendThreshold atomic.Int64
+
+// SetUpstream5xxSuspendThreshold configures the global consecutive 5xx suspension threshold.
+// Negative values are clamped to 0 (feature disabled).
+func SetUpstream5xxSuspendThreshold(threshold int) {
+	if threshold < 0 {
+		threshold = 0
+	}
+	upstream5xxSuspendThreshold.Store(int64(threshold))
+}
+
+// effectiveUpstream5xxSuspendThreshold returns the threshold for an auth, preferring the
+// per-auth metadata override when set, otherwise falling back to the global atomic.
+// Negative values are clamped to 0.
+func effectiveUpstream5xxSuspendThreshold(auth *Auth) int {
+	if auth != nil {
+		if override, ok := auth.Upstream5xxSuspendThresholdOverride(); ok {
+			if override < 0 {
+				return 0
+			}
+			return override
+		}
+	}
+	val := int(upstream5xxSuspendThreshold.Load())
+	if val < 0 {
+		return 0
+	}
+	return val
+}
+
+// recordUpstream5xxAndMaybeSuspend increments the consecutive 5xx counter and, if the
+// threshold is reached, marks the auth as persistently disabled. The caller MUST hold
+// Manager.mu. Returns true if the auth was suspended by this call.
+//
+// The counter is intentionally NOT reset after suspension. It is reset only on (a) a
+// subsequent 2xx success via clearAuthStateOnSuccess / the per-model success branch of
+// MarkResult, or (b) an explicit operator re-enable via Manager.ResetUpstream5xxCount.
+// Leaving the counter at the threshold means an operator who manually flips
+// Disabled=false WITHOUT going through ResetUpstream5xxCount would see the auth
+// re-suspend on the very next 5xx. This is deliberate.
+//
+// Note: this function does not close in-flight Codex websocket sessions. Operators can
+// use the management API to explicitly disable + close if needed.
+func recordUpstream5xxAndMaybeSuspend(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	threshold := effectiveUpstream5xxSuspendThreshold(auth)
+	if threshold <= 0 {
+		return false
+	}
+	auth.consecutive5xxCount++
+	if auth.consecutive5xxCount < threshold {
+		return false
+	}
+	auth.Disabled = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = fmt.Sprintf("suspended after %d consecutive upstream 5xx errors", auth.consecutive5xxCount)
+	auth.UpdatedAt = now
+	log.WithFields(log.Fields{
+		"auth_id":   auth.ID,
+		"provider":  auth.Provider,
+		"threshold": threshold,
+	}).Warn("auth suspended after consecutive upstream 5xx errors")
+	return true
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -2157,6 +2226,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	auth.consecutive5xxCount = existing.consecutive5xxCount
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
@@ -3630,6 +3700,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
+				auth.consecutive5xxCount = 0
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -3646,6 +3717,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
+					suspendedByThreshold := false
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
 					state.Status = StatusError
@@ -3735,18 +3807,27 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 500, 502, 503, 504:
+						case 408:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
 							}
+						case 500, 502, 503, 504:
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								state.NextRetryAfter = nextTransientErrorRetryAfter(now)
+							}
+							suspendedByThreshold = recordUpstream5xxAndMaybeSuspend(auth, now)
 						default:
 							state.NextRetryAfter = time.Time{}
 						}
 					}
 
-					auth.Status = StatusError
+					if !suspendedByThreshold {
+						auth.Status = StatusError
+					}
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
@@ -3944,6 +4025,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.BackoffLevel = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
+	auth.consecutive5xxCount = 0
 	auth.UpdatedAt = now
 }
 
@@ -4279,13 +4361,21 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
+	case 408:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {
 			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
 		}
+	case 500, 502, 503, 504:
+		auth.StatusMessage = "transient upstream error"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = nextTransientErrorRetryAfter(now)
+		}
+		recordUpstream5xxAndMaybeSuspend(auth, now)
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
@@ -4352,6 +4442,21 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 		return nil, false
 	}
 	return auth.Clone(), true
+}
+
+// ResetUpstream5xxCount resets the consecutive 5xx counter for the given auth to zero.
+// Used by the management API when an operator re-enables a threshold-suspended auth.
+// The counter is in-memory only, so no persistence is required.
+func (m *Manager) ResetUpstream5xxCount(ctx context.Context, authID string) {
+	_ = ctx
+	if m == nil || authID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if auth, ok := m.auths[authID]; ok && auth != nil {
+		auth.consecutive5xxCount = 0
+	}
 }
 
 // GetExecutionSessionAuthByID retrieves a Home runtime auth scoped to an execution session.
@@ -5388,6 +5493,14 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	// Skip persistence when metadata is absent (e.g., runtime-only auths).
 	if auth.Metadata == nil {
 		return nil
+	}
+	// Skip persistence for auths without any file backing (e.g., synthesized API-key
+	// auths with no Storage, no FileName, and no Attributes["path"]). Threshold-disable
+	// for these entries is in-memory only by design.
+	if auth.Storage == nil && strings.TrimSpace(auth.FileName) == "" {
+		if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["path"]) == "" {
+			return nil
+		}
 	}
 	_, err := m.store.Save(ctx, auth)
 	return err

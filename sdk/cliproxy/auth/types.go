@@ -96,6 +96,11 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
+	// consecutive5xxCount tracks consecutive upstream 5xx server errors (HTTP 500/502/503/504)
+	// observed across all models for this auth. Reset to 0 on the next 2xx success or by an
+	// explicit operator re-enable via the management API. Not persisted; in-memory only.
+	consecutive5xxCount int `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
 }
@@ -455,6 +460,43 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// ConsecutiveUpstream5xxCount returns the number of consecutive upstream 5xx server errors
+// observed for this auth. The value is safe to read on snapshots returned by Manager.Clone().
+// Returns 0 when the receiver is nil.
+func (a *Auth) ConsecutiveUpstream5xxCount() int {
+	if a == nil {
+		return 0
+	}
+	return a.consecutive5xxCount
+}
+
+// Upstream5xxSuspendThresholdOverride returns the auth-scoped consecutive-5xx suspension
+// threshold override when present. The value is read from metadata key
+// "upstream_5xx_suspend_threshold" (or legacy "upstream-5xx-suspend-threshold").
+// Negative values are clamped to 0. Returns (0, false) when the key is absent.
+func (a *Auth) Upstream5xxSuspendThresholdOverride() (int, bool) {
+	if a == nil || a.Metadata == nil {
+		return 0, false
+	}
+	if val, ok := a.Metadata["upstream_5xx_suspend_threshold"]; ok {
+		if parsed, okParse := parseIntAny(val); okParse {
+			if parsed < 0 {
+				parsed = 0
+			}
+			return parsed, true
+		}
+	}
+	if val, ok := a.Metadata["upstream-5xx-suspend-threshold"]; ok {
+		if parsed, okParse := parseIntAny(val); okParse {
+			if parsed < 0 {
+				parsed = 0
+			}
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 // ToolPrefixDisabled returns whether Claude OAuth tool name rewriting should be

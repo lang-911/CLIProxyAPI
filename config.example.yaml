@@ -141,6 +141,13 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# Number of consecutive upstream 5xx server errors (HTTP 500/502/503/504) before an
+# authentication file is suspended (Disabled=true). Set to 0 to disable.
+# The counter resets on the next 2xx success. HTTP 408 keeps the existing 1-minute
+# cooldown but does not increment the counter.
+# Default: 5.
+upstream-5xx-suspend-threshold: 5
+
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
@@ -210,6 +217,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "AIzaSy...01"
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     upstream-5xx-suspend-threshold: 10 # optional: override the global threshold for this credential (omit to inherit)
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -248,6 +256,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     upstream-5xx-suspend-threshold: 10 # optional: override the global threshold for this credential (omit to inherit)
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -269,6 +278,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     upstream-5xx-suspend-threshold: 10 # optional: override the global threshold for this credential (omit to inherit)
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -356,6 +366,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     upstream-5xx-suspend-threshold: 10 # optional: override the global threshold for this provider (omit to inherit)
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

@@ -54,6 +54,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
 		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
 	}
+	if oldCfg.Upstream5xxSuspendThreshold != newCfg.Upstream5xxSuspendThreshold {
+		changes = append(changes, fmt.Sprintf("upstream-5xx-suspend-threshold: %d -> %d", oldCfg.Upstream5xxSuspendThreshold, newCfg.Upstream5xxSuspendThreshold))
+	}
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}

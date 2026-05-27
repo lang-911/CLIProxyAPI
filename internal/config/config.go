@@ -89,6 +89,11 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// Upstream5xxSuspendThreshold suspends an auth (Disabled=true) after N consecutive upstream
+	// 5xx server errors (HTTP 500/502/503/504). HTTP 408 is excluded. The counter resets on the
+	// next 2xx success. Set to 0 to disable the feature; defaults to 5.
+	Upstream5xxSuspendThreshold int `yaml:"upstream-5xx-suspend-threshold" json:"upstream-5xx-suspend-threshold"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
@@ -543,6 +548,10 @@ type ClaudeKey struct {
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
+	// Upstream5xxSuspendThreshold overrides the global upstream-5xx-suspend-threshold for this
+	// credential. Nil means inherit the global setting; 0 disables the feature for this credential.
+	Upstream5xxSuspendThreshold *int `yaml:"upstream-5xx-suspend-threshold,omitempty" json:"upstream-5xx-suspend-threshold,omitempty"`
+
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 
@@ -605,6 +614,10 @@ type CodexKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Upstream5xxSuspendThreshold overrides the global upstream-5xx-suspend-threshold for this
+	// credential. Nil means inherit the global setting; 0 disables the feature for this credential.
+	Upstream5xxSuspendThreshold *int `yaml:"upstream-5xx-suspend-threshold,omitempty" json:"upstream-5xx-suspend-threshold,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -656,6 +669,10 @@ type GeminiKey struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Upstream5xxSuspendThreshold overrides the global upstream-5xx-suspend-threshold for this
+	// credential. Nil means inherit the global setting; 0 disables the feature for this credential.
+	Upstream5xxSuspendThreshold *int `yaml:"upstream-5xx-suspend-threshold,omitempty" json:"upstream-5xx-suspend-threshold,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
@@ -707,6 +724,10 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Upstream5xxSuspendThreshold overrides the global upstream-5xx-suspend-threshold for this
+	// provider. Nil means inherit the global setting; 0 disables the feature for this provider.
+	Upstream5xxSuspendThreshold *int `yaml:"upstream-5xx-suspend-threshold,omitempty" json:"upstream-5xx-suspend-threshold,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -800,6 +821,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
 	cfg.TransientErrorCooldownSeconds = 0
+	cfg.Upstream5xxSuspendThreshold = 5
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.WebsocketAuth = true
 	cfg.Pprof.Enable = false
@@ -856,6 +878,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	if cfg.Upstream5xxSuspendThreshold < 0 {
+		cfg.Upstream5xxSuspendThreshold = 0
 	}
 
 	cfg.NormalizePluginsConfig()

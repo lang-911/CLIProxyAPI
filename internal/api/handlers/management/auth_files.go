@@ -1301,6 +1301,9 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	// Capture the prior disabled state to detect a true -> false re-enable transition.
+	wasDisabled := targetAuth.Disabled
+
 	// Update disabled state
 	targetAuth.Disabled = *req.Disabled
 	if *req.Disabled {
@@ -1315,6 +1318,11 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
+	}
+
+	// Reset the consecutive 5xx counter only on a true -> false transition (operator re-enable).
+	if wasDisabled && !*req.Disabled {
+		h.authManager.ResetUpstream5xxCount(ctx, targetAuth.ID)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})

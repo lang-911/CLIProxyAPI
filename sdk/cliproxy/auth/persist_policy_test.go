@@ -23,9 +23,11 @@ func TestWithSkipPersist_DisablesUpdatePersistence(t *testing.T) {
 	store := &countingStore{}
 	mgr := NewManager(store, nil, nil)
 	auth := &Auth{
-		ID:       "auth-1",
-		Provider: "antigravity",
-		Metadata: map[string]any{"type": "antigravity"},
+		ID:         "auth-1",
+		Provider:   "antigravity",
+		FileName:   "auth-1.json",
+		Attributes: map[string]string{"path": "/tmp/auth-1.json"},
+		Metadata:   map[string]any{"type": "antigravity"},
 	}
 
 	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {

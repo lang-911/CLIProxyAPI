@@ -89,9 +89,11 @@ func TestManagerExecute_PreparesAndPersistsMissingRequestAuthMetadata(t *testing
 	manager.RegisterExecutor(executor)
 
 	auth := &Auth{
-		ID:       "auth-request-prepare",
-		Provider: "antigravity",
-		Metadata: map[string]any{"access_token": "token"},
+		ID:         "auth-request-prepare",
+		Provider:   "antigravity",
+		FileName:   "auth-request-prepare.json",
+		Attributes: map[string]string{"path": "/tmp/auth-request-prepare.json"},
+		Metadata:   map[string]any{"access_token": "token"},
 	}
 	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)

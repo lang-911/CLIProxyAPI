@@ -27,6 +27,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
 	cfg.TransientErrorCooldownSeconds = 0
+	cfg.Upstream5xxSuspendThreshold = 5
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.WebsocketAuth = true
 	cfg.Pprof.Enable = false
@@ -73,6 +74,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	if cfg.Upstream5xxSuspendThreshold < 0 {
+		cfg.Upstream5xxSuspendThreshold = 0
 	}
 
 	cfg.NormalizePluginsConfig()

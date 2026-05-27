@@ -78,6 +78,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 		if entry.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
+		if entry.Upstream5xxSuspendThreshold != nil {
+			metadata["upstream_5xx_suspend_threshold"] = *entry.Upstream5xxSuspendThreshold
+		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
@@ -132,6 +135,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		metadata := map[string]any{}
 		if ck.DisableCooling {
 			metadata["disable_cooling"] = true
+		}
+		if ck.Upstream5xxSuspendThreshold != nil {
+			metadata["upstream_5xx_suspend_threshold"] = *ck.Upstream5xxSuspendThreshold
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -190,6 +196,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		metadata := map[string]any{}
 		if ck.DisableCooling {
 			metadata["disable_cooling"] = true
+		}
+		if ck.Upstream5xxSuspendThreshold != nil {
+			metadata["upstream_5xx_suspend_threshold"] = *ck.Upstream5xxSuspendThreshold
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -265,6 +274,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if disableCooling {
 				metadata["disable_cooling"] = true
 			}
+			if compat.Upstream5xxSuspendThreshold != nil {
+				metadata["upstream_5xx_suspend_threshold"] = *compat.Upstream5xxSuspendThreshold
+			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
@@ -306,6 +318,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			metadata := map[string]any{}
 			if disableCooling {
 				metadata["disable_cooling"] = true
+			}
+			if compat.Upstream5xxSuspendThreshold != nil {
+				metadata["upstream_5xx_suspend_threshold"] = *compat.Upstream5xxSuspendThreshold
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
