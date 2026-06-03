@@ -386,18 +386,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
-	// Apply cloaking (system prompt injection, Claude-compatible metadata, sensitive word obfuscation)
-	// based on client type and configuration.
-	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	if err != nil {
-		return resp, err
-	}
-
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
 		body = applyClaudeSystemPromptTransformations(body, rules)
+	}
+
+	// Apply cloaking (system prompt injection, Claude-compatible metadata, sensitive word obfuscation)
+	// after provider-specific system prompt transforms so injected blocks stay stable.
+	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	if err != nil {
+		return resp, err
 	}
 	if reloc := resolvePromptRelocation(e.cfg, apiKey); reloc != nil {
 		prefixLen := claudeInjectedSystemPrefixLength(gjson.GetBytes(body, "system").Array())
@@ -611,18 +611,18 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
-	// Apply cloaking (system prompt injection, Claude-compatible metadata, sensitive word obfuscation)
-	// based on client type and configuration.
-	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	if err != nil {
-		return nil, err
-	}
-
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
 		body = applyClaudeSystemPromptTransformations(body, rules)
+	}
+
+	// Apply cloaking (system prompt injection, Claude-compatible metadata, sensitive word obfuscation)
+	// after provider-specific system prompt transforms so injected blocks stay stable.
+	body, err = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	if err != nil {
+		return nil, err
 	}
 	if reloc := resolvePromptRelocation(e.cfg, apiKey); reloc != nil {
 		prefixLen := claudeInjectedSystemPrefixLength(gjson.GetBytes(body, "system").Array())
@@ -934,11 +934,11 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
-	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body, e.cfg)
-	}
 	if rules := resolveClaudeSystemPromptTransformations(e.cfg, apiKey); len(rules) > 0 {
 		body = applyClaudeSystemPromptTransformations(body, rules)
+	}
+	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
+		body = checkSystemInstructions(body, e.cfg)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
