@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -91,7 +92,7 @@ func BuildAuthorizeURL(params AuthorizeURLParams) (string, error) {
 		"state":                 {strings.TrimSpace(params.State)},
 		"nonce":                 {strings.TrimSpace(params.Nonce)},
 		"plan":                  {"generic"},
-		"referrer":              {"cli-proxy-api"},
+		"referrer":              {ProfileGrokBuild},
 	}
 	return endpoint + "?" + values.Encode(), nil
 }
@@ -170,11 +171,14 @@ func (a *XAIAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI s
 		return nil, err
 	}
 	return &AuthBundle{
-		TokenData:     *tokenData,
-		LastRefresh:   time.Now().UTC().Format(time.RFC3339),
-		BaseURL:       DefaultAPIBaseURL,
-		RedirectURI:   strings.TrimSpace(redirectURI),
-		TokenEndpoint: strings.TrimSpace(tokenEndpoint),
+		TokenData:            *tokenData,
+		LastRefresh:          time.Now().UTC().Format(time.RFC3339),
+		BaseURL:              GrokBuildAPIBaseURL,
+		RedirectURI:          strings.TrimSpace(redirectURI),
+		TokenEndpoint:        strings.TrimSpace(tokenEndpoint),
+		XAIProfile:           ProfileGrokBuild,
+		XAIGrokClientVersion: GrokBuildClientVersion,
+		XAIGrokAgentID:       uuid.NewString(),
 	}, nil
 }
 
@@ -286,10 +290,14 @@ func (a *XAIAuth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		LastRefresh:   bundle.LastRefresh,
 		Email:         strings.TrimSpace(bundle.TokenData.Email),
 		Subject:       bundle.TokenData.Subject,
-		BaseURL:       firstNonEmpty(bundle.BaseURL, DefaultAPIBaseURL),
+		BaseURL:       firstNonEmpty(bundle.BaseURL, GrokBuildAPIBaseURL),
 		RedirectURI:   bundle.RedirectURI,
 		TokenEndpoint: bundle.TokenEndpoint,
 		AuthKind:      "oauth",
+		XAIProfile:    firstNonEmpty(bundle.XAIProfile, ProfileGrokBuild),
+
+		XAIGrokClientVersion: firstNonEmpty(bundle.XAIGrokClientVersion, GrokBuildClientVersion),
+		XAIGrokAgentID:       firstNonEmpty(bundle.XAIGrokAgentID, uuid.NewString()),
 	}
 }
 

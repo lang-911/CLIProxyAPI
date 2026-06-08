@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,9 +55,25 @@ const (
 	xaiVideosPath               = "/videos"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
+	xaiGrokClientIdentifier     = "grok-pager"
+	xaiGrokTokenAuth            = "xai-grok-cli"
+	xaiGrokAuthenticateResponse = "authenticate-response"
+	xaiGrokTurnStateMaxAge      = 24 * time.Hour
 )
 
-// XAIExecutor is a stateless executor for xAI Grok's Responses API.
+var xaiGrokTurns = struct {
+	sync.Mutex
+	sessions map[string]xaiGrokTurnState
+}{
+	sessions: make(map[string]xaiGrokTurnState),
+}
+
+type xaiGrokTurnState struct {
+	next     int
+	lastSeen time.Time
+}
+
+// XAIExecutor executes xAI Grok API requests.
 type XAIExecutor struct {
 	cfg *config.Config
 }
@@ -113,12 +132,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return e.executeVideos(ctx, auth, req, opts)
 	}
 
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, baseURL := xaiTextCreds(auth)
 
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return resp, err
 	}
@@ -132,7 +148,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	e.applyXAITextHeaders(httpReq, auth, token, prepared)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -142,14 +158,19 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	bodyReader, errDecode := xaiDecodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+	if errDecode != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDecode)
+		return resp, errDecode
+	}
 	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		if errClose := bodyReader.Close(); errClose != nil {
 			log.Errorf("xai executor: close response body error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, errRead := io.ReadAll(httpResp.Body)
+		data, errRead := io.ReadAll(bodyReader)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return resp, errRead
@@ -159,7 +180,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
 	}
 
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := io.ReadAll(bodyReader)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -209,7 +230,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
 
-	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
+	prepared, err := e.prepareResponsesRequestTo(ctx, auth, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -454,10 +475,7 @@ func xaiBuildSSEFrame(eventName string, data []byte) []byte {
 }
 
 func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, endpointPath string) (resp cliproxyexecutor.Response, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, baseURL := xaiMediaCreds(auth)
 	if endpointPath == "" {
 		endpointPath = xaiDefaultImageEndpointPath
 	}
@@ -499,10 +517,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, baseURL := xaiMediaCreds(auth)
 
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
@@ -571,12 +586,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return e.executeCompactionTriggerStream(ctx, auth, req, opts)
 	}
 
-	token, baseURL := xaiCreds(auth)
-	if baseURL == "" {
-		baseURL = xaiauth.DefaultAPIBaseURL
-	}
+	token, baseURL := xaiTextCreds(auth)
 
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, err := e.prepareResponsesRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return nil, err
 	}
@@ -590,7 +602,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	e.applyXAITextHeaders(httpReq, auth, token, prepared)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -601,9 +613,14 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	bodyReader, errDecode := xaiDecodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+	if errDecode != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDecode)
+		return nil, errDecode
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, errRead := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		data, errRead := io.ReadAll(bodyReader)
+		if errClose := bodyReader.Close(); errClose != nil {
 			log.Errorf("xai executor: close response body error: %v", errClose)
 		}
 		if errRead != nil {
@@ -619,11 +636,11 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	go func() {
 		defer close(out)
 		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
+			if errClose := bodyReader.Close(); errClose != nil {
 				log.Errorf("xai executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
+		scanner := bufio.NewScanner(bodyReader)
 		scanner.Buffer(nil, 52_428_800)
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
@@ -714,7 +731,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 
 // CountTokens estimates token count for xAI Responses requests.
 func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, false)
+	prepared, err := e.prepareResponsesRequest(ctx, auth, req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -780,16 +797,39 @@ func (e *XAIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cl
 	if tokenEndpoint != "" {
 		auth.Metadata["token_endpoint"] = tokenEndpoint
 	}
+	profile := xaiProfile(auth)
+	auth.Metadata["xai_profile"] = profile
 	if xaiMetadataString(auth.Metadata, "base_url") == "" {
-		auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
+		if profile == xaiauth.ProfilePublicAPI {
+			auth.Metadata["base_url"] = xaiauth.DefaultAPIBaseURL
+		} else {
+			auth.Metadata["base_url"] = xaiauth.GrokBuildAPIBaseURL
+		}
+	}
+	if profile == xaiauth.ProfileGrokBuild {
+		if xaiMetadataString(auth.Metadata, "xai_grok_client_version") == "" {
+			auth.Metadata["xai_grok_client_version"] = xaiauth.GrokBuildClientVersion
+		}
+		if xaiMetadataString(auth.Metadata, "xai_grok_agent_id") == "" {
+			auth.Metadata["xai_grok_agent_id"] = xaiGrokAgentID(auth)
+		}
 	}
 	auth.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
 	auth.Attributes["auth_kind"] = "oauth"
+	auth.Attributes["xai_profile"] = profile
 	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
-		auth.Attributes["base_url"] = xaiauth.DefaultAPIBaseURL
+		auth.Attributes["base_url"] = xaiMetadataString(auth.Metadata, "base_url")
+	}
+	if profile == xaiauth.ProfileGrokBuild {
+		if strings.TrimSpace(auth.Attributes["xai_grok_client_version"]) == "" {
+			auth.Attributes["xai_grok_client_version"] = xaiMetadataString(auth.Metadata, "xai_grok_client_version")
+		}
+		if strings.TrimSpace(auth.Attributes["xai_grok_agent_id"]) == "" {
+			auth.Attributes["xai_grok_agent_id"] = xaiMetadataString(auth.Metadata, "xai_grok_agent_id")
+		}
 	}
 	return auth, nil
 }
@@ -803,13 +843,17 @@ type xaiPreparedRequest struct {
 	body            []byte
 	sessionID       string
 	replayScope     xaiReasoningReplayScope
+	profile         string
+	grokAgentID     string
+	grokTurnIndex   string
+	grokClientVer   string
 }
 
-func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
-	return e.prepareResponsesRequestTo(ctx, req, opts, stream, sdktranslator.FormatCodex)
+func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
+	return e.prepareResponsesRequestTo(ctx, auth, req, opts, stream, sdktranslator.FormatCodex)
 }
 
-func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
+func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -818,6 +862,27 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
+	profile := xaiProfile(auth)
+	if profile == xaiauth.ProfileGrokBuild {
+		body, errPrepare := e.prepareGrokBuildResponsesRequest(req, opts, baseModel, from, stream)
+		if errPrepare != nil {
+			return nil, errPrepare
+		}
+		return &xaiPreparedRequest{
+			baseModel:       baseModel,
+			from:            from,
+			responseFormat:  responseFormat,
+			to:              to,
+			originalPayload: originalPayload,
+			body:            body,
+			sessionID:       xaiGrokExecutionSessionID(req, opts),
+			profile:         profile,
+			grokAgentID:     xaiGrokMetadataString(req, opts, "xai_grok_agent_id"),
+			grokTurnIndex:   xaiGrokMetadataString(req, opts, "xai_grok_turn_idx"),
+			grokClientVer:   xaiGrokMetadataString(req, opts, "xai_grok_client_version"),
+		}, nil
+	}
+
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
 
@@ -865,7 +930,220 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		body:            body,
 		sessionID:       sessionID,
 		replayScope:     replayScope,
+		profile:         profile,
 	}, nil
+}
+
+func (e *XAIExecutor) prepareGrokBuildResponsesRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string, from sdktranslator.Format, stream bool) ([]byte, error) {
+	body := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		body = bytes.Clone(opts.OriginalRequest)
+	}
+	if from.String() == "openai" {
+		body = convertOpenAIChatToXAIGrokBuildResponses(baseModel, body, stream)
+	}
+	body = xaiEnsureGrokBuildInput(body)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "stream", stream)
+	body, _ = sjson.SetBytes(body, "store", false)
+	body, _ = sjson.SetBytes(body, "include", []string{"reasoning.encrypted_content"})
+	body, _ = sjson.SetBytes(body, "reasoning.summary", "concise")
+	supportsReasoningEffort := xaiSupportsReasoningEffort(baseModel)
+	requestedReasoningEffort := ""
+	if supportsReasoningEffort {
+		requestedReasoningEffort = thinking.ExtractReasoningEffort(body, e.Identifier(), req.Model)
+	}
+	var err error
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
+	if err != nil {
+		return nil, err
+	}
+	if supportsReasoningEffort {
+		if requestedReasoningEffort != "" {
+			body, _ = sjson.SetBytes(body, "reasoning.effort", requestedReasoningEffort)
+		}
+	} else {
+		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+		body = removeEmptyXAIReasoningConfig(body)
+	}
+	body = normalizeXAITools(body)
+	body = normalizeXAIGrokBuildToolChoice(body)
+	body = normalizeXAIInputReasoningItems(body)
+	body = sanitizeXAIGrokBuildResponsesBody(body)
+	return body, nil
+}
+
+func convertOpenAIChatToXAIGrokBuildResponses(modelName string, rawJSON []byte, stream bool) []byte {
+	out := []byte(`{"input":[]}`)
+	out, _ = sjson.SetBytes(out, "model", modelName)
+	out, _ = sjson.SetBytes(out, "stream", stream)
+	out, _ = sjson.SetBytes(out, "store", false)
+
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if messages.IsArray() {
+		for _, msg := range messages.Array() {
+			role := strings.TrimSpace(msg.Get("role").String())
+			switch role {
+			case "tool":
+				item := []byte(`{"type":"function_call_output"}`)
+				item, _ = sjson.SetBytes(item, "call_id", msg.Get("tool_call_id").String())
+				content := msg.Get("content")
+				if content.Type == gjson.String {
+					item, _ = sjson.SetBytes(item, "output", content.String())
+				} else if content.Exists() {
+					item, _ = sjson.SetRawBytes(item, "output", []byte(content.Raw))
+				}
+				out, _ = sjson.SetRawBytes(out, "input.-1", item)
+			default:
+				item := []byte(`{"type":"message"}`)
+				item, _ = sjson.SetBytes(item, "role", role)
+				item = xaiSetGrokBuildMessageContent(item, msg.Get("content"), role)
+				out, _ = sjson.SetRawBytes(out, "input.-1", item)
+				if role == "assistant" {
+					for _, toolCall := range msg.Get("tool_calls").Array() {
+						if toolCall.Get("type").String() != "function" {
+							continue
+						}
+						call := []byte(`{"type":"function_call"}`)
+						call, _ = sjson.SetBytes(call, "call_id", toolCall.Get("id").String())
+						call, _ = sjson.SetBytes(call, "name", toolCall.Get("function.name").String())
+						call, _ = sjson.SetBytes(call, "arguments", toolCall.Get("function.arguments").String())
+						out, _ = sjson.SetRawBytes(out, "input.-1", call)
+					}
+				}
+			}
+		}
+	}
+
+	if tools := gjson.GetBytes(rawJSON, "tools"); tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() == xaiFunctionToolType && tool.Get("function").Exists() {
+				fn := []byte(`{"type":"function"}`)
+				fnResult := tool.Get("function")
+				for _, field := range []string{"name", "description", "parameters"} {
+					if value := fnResult.Get(field); value.Exists() {
+						if value.Type == gjson.JSON {
+							fn, _ = sjson.SetRawBytes(fn, field, []byte(value.Raw))
+						} else {
+							fn, _ = sjson.SetBytes(fn, field, value.Value())
+						}
+					}
+				}
+				out, _ = sjson.SetRawBytes(out, "tools.-1", fn)
+				continue
+			}
+			out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(tool.Raw))
+		}
+	}
+	return out
+}
+
+func xaiSetGrokBuildMessageContent(item []byte, content gjson.Result, role string) []byte {
+	if content.Type == gjson.String {
+		return setJSONBytes(item, "content", content.String())
+	}
+	if content.IsArray() {
+		item, _ = sjson.SetRawBytes(item, "content", []byte(`[]`))
+		for _, part := range content.Array() {
+			partType := part.Get("type").String()
+			switch partType {
+			case "text":
+				outPart := []byte(`{"type":"input_text"}`)
+				if role == "assistant" {
+					outPart, _ = sjson.SetBytes(outPart, "type", "output_text")
+				}
+				outPart, _ = sjson.SetBytes(outPart, "text", part.Get("text").String())
+				item, _ = sjson.SetRawBytes(item, "content.-1", outPart)
+			case "image_url":
+				outPart := []byte(`{"type":"input_image"}`)
+				outPart, _ = sjson.SetBytes(outPart, "image_url", part.Get("image_url.url").String())
+				item, _ = sjson.SetRawBytes(item, "content.-1", outPart)
+			default:
+				item, _ = sjson.SetRawBytes(item, "content.-1", []byte(part.Raw))
+			}
+		}
+		return item
+	}
+	if content.Exists() {
+		item, _ = sjson.SetRawBytes(item, "content", []byte(content.Raw))
+	}
+	return item
+}
+
+func setJSONBytes(body []byte, path string, value any) []byte {
+	updated, errSet := sjson.SetBytes(body, path, value)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiEnsureGrokBuildInput(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if input.Type != gjson.String {
+		return body
+	}
+	item := []byte(`{"type":"message","role":"user"}`)
+	item, _ = sjson.SetBytes(item, "content", input.String())
+	inputArray := []byte(`[]`)
+	inputArray, _ = sjson.SetRawBytes(inputArray, "-1", item)
+	body, _ = sjson.SetRawBytes(body, "input", inputArray)
+	return body
+}
+
+func normalizeXAIGrokBuildToolChoice(body []byte) []byte {
+	body = normalizeXAIToolChoiceForTools(body)
+	body, _ = sjson.DeleteBytes(body, "tool_choice")
+	body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	return body
+}
+
+func sanitizeXAIGrokBuildResponsesBody(body []byte) []byte {
+	for _, path := range []string{
+		"previous_response_id",
+		"prompt_cache_retention",
+		"safety_identifier",
+		"stream_options",
+		"instructions",
+		"parallel_tool_calls",
+		"prompt_cache_key",
+		"metadata",
+		"temperature",
+		"top_p",
+		"top_k",
+		"max_output_tokens",
+		"max_completion_tokens",
+		"max_tokens",
+		"service_tier",
+		"top_logprobs",
+		"presence_penalty",
+		"frequency_penalty",
+		"max_tool_calls",
+		"background",
+		"truncation",
+		"user",
+		"text",
+		"tool_choice",
+	} {
+		body, _ = sjson.DeleteBytes(body, path)
+	}
+
+	out := []byte(`{}`)
+	for _, path := range []string{"include", "input", "model", "reasoning", "store", "stream", "tools"} {
+		value := gjson.GetBytes(body, path)
+		if !value.Exists() {
+			continue
+		}
+		if path == "tools" && (!value.IsArray() || len(value.Array()) == 0) {
+			continue
+		}
+		if value.Type == gjson.JSON {
+			out, _ = sjson.SetRawBytes(out, path, []byte(value.Raw))
+		} else {
+			out, _ = sjson.SetBytes(out, path, value.Value())
+		}
+	}
+	return out
 }
 
 func (e *XAIExecutor) recordXAIRequest(ctx context.Context, auth *cliproxyauth.Auth, url string, headers http.Header, body []byte) {
@@ -907,6 +1185,59 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
+func xaiTextCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
+	token, baseURL = xaiCreds(auth)
+	if baseURL != "" {
+		return token, baseURL
+	}
+	if xaiProfile(auth) == xaiauth.ProfilePublicAPI {
+		return token, xaiauth.DefaultAPIBaseURL
+	}
+	return token, xaiauth.GrokBuildAPIBaseURL
+}
+
+func xaiMediaCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
+	token, baseURL = xaiCreds(auth)
+	if baseURL == "" || (xaiProfile(auth) == xaiauth.ProfileGrokBuild && strings.TrimRight(baseURL, "/") == xaiauth.GrokBuildAPIBaseURL) {
+		baseURL = xaiauth.DefaultAPIBaseURL
+	}
+	return token, baseURL
+}
+
+func xaiProfile(auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if value := strings.ToLower(strings.TrimSpace(auth.Attributes["xai_profile"])); value != "" {
+			if value == xaiauth.ProfilePublicAPI {
+				return xaiauth.ProfilePublicAPI
+			}
+			return xaiauth.ProfileGrokBuild
+		}
+		if value := strings.ToLower(xaiMetadataString(auth.Metadata, "xai_profile")); value != "" {
+			if value == xaiauth.ProfilePublicAPI {
+				return xaiauth.ProfilePublicAPI
+			}
+			return xaiauth.ProfileGrokBuild
+		}
+		_, baseURL := xaiCreds(auth)
+		if strings.TrimRight(baseURL, "/") == xaiauth.DefaultAPIBaseURL {
+			return xaiauth.ProfilePublicAPI
+		}
+	}
+	return xaiauth.ProfileGrokBuild
+}
+
+func (e *XAIExecutor) applyXAITextHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, prepared *xaiPreparedRequest) {
+	if prepared != nil && prepared.profile == xaiauth.ProfileGrokBuild {
+		applyXAIGrokBuildHeaders(r, auth, token, prepared)
+		return
+	}
+	sessionID := ""
+	if prepared != nil {
+		sessionID = prepared.sessionID
+	}
+	applyXAIHeaders(r, auth, token, true, sessionID)
+}
+
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
 	r.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
@@ -945,6 +1276,119 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 	return uuid.NewString(), nil
 }
 
+func applyXAIGrokBuildHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, prepared *xaiPreparedRequest) {
+	r.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(token) != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	r.Header.Set("Accept", "text/event-stream")
+	r.Header.Set("Accept-Encoding", "gzip, br, deflate")
+	r.Header.Set("Connection", "Keep-Alive")
+	r.Header.Set("x-xai-token-auth", xaiGrokTokenAuth)
+	r.Header.Set("x-authenticateresponse", xaiGrokAuthenticateResponse)
+	clientVersion := ""
+	if prepared != nil {
+		clientVersion = prepared.grokClientVer
+	}
+	if clientVersion == "" {
+		clientVersion = xaiGrokClientVersion(auth)
+	}
+	r.Header.Set("x-grok-client-version", clientVersion)
+	r.Header.Set("x-grok-client-identifier", xaiGrokClientIdentifier)
+	r.Header.Set("User-Agent", fmt.Sprintf("grok-pager/%s grok-shell/%s (macos; aarch64)", clientVersion, clientVersion))
+	r.Header.Set("traceparent", xaiGrokTraceparent())
+	r.Header.Set("x-grok-req-id", uuid.NewString())
+	if prepared != nil {
+		r.Header.Set("x-grok-model-override", prepared.baseModel)
+		if prepared.sessionID != "" {
+			r.Header.Set("x-grok-conv-id", prepared.sessionID)
+			r.Header.Set("x-grok-session-id", prepared.sessionID)
+			turnIndex := prepared.grokTurnIndex
+			if turnIndex == "" {
+				turnIndex = fmt.Sprintf("%d", xaiNextGrokTurnIndex(auth, prepared.sessionID))
+			}
+			r.Header.Set("x-grok-turn-idx", turnIndex)
+		}
+	}
+	agentID := ""
+	if prepared != nil {
+		agentID = prepared.grokAgentID
+	}
+	if agentID == "" {
+		agentID = xaiGrokAgentID(auth)
+	}
+	if agentID != "" {
+		r.Header.Set("x-grok-agent-id", agentID)
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func xaiGrokClientVersion(auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if value := strings.TrimSpace(auth.Attributes["xai_grok_client_version"]); value != "" {
+			return value
+		}
+		if value := xaiMetadataString(auth.Metadata, "xai_grok_client_version"); value != "" {
+			return value
+		}
+	}
+	return xaiauth.GrokBuildClientVersion
+}
+
+func xaiGrokAgentID(auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if value := strings.TrimSpace(auth.Attributes["xai_grok_agent_id"]); value != "" {
+			return value
+		}
+		if value := xaiMetadataString(auth.Metadata, "xai_grok_agent_id"); value != "" {
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["xai_grok_agent_id"] = value
+			return value
+		}
+	}
+	agentID := uuid.NewString()
+	if auth != nil {
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Metadata["xai_grok_agent_id"] = agentID
+		auth.Attributes["xai_grok_agent_id"] = agentID
+	}
+	return agentID
+}
+
+func xaiGrokTraceparent() string {
+	traceID := xaiRandomHex(16)
+	spanID := xaiRandomHex(8)
+	if traceID == "" {
+		traceID = strings.ReplaceAll(uuid.NewString(), "-", "")[:32]
+	}
+	if spanID == "" {
+		spanID = strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
+	}
+	return fmt.Sprintf("00-%s-%s-01", traceID, spanID)
+}
+
+func xaiRandomHex(size int) string {
+	if size <= 0 {
+		return ""
+	}
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(buf)
+}
+
 func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
 	if value := xaiMetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return value
@@ -960,6 +1404,63 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 
 func xaiRequiresIsolatedConversation(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), xaiComposerModelPrefix)
+}
+
+func xaiGrokExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if value := xaiMetadataString(opts.Metadata, "xai_grok_session_id"); value != "" {
+		return value
+	}
+	if value := xaiMetadataString(req.Metadata, "xai_grok_session_id"); value != "" {
+		return value
+	}
+	if value := xaiMetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return value
+	}
+	if value := xaiMetadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return value
+	}
+	if u, err := uuid.NewV7(); err == nil {
+		return u.String()
+	}
+	return uuid.NewString()
+}
+
+func xaiGrokMetadataString(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, key string) string {
+	if value := xaiMetadataString(opts.Metadata, key); value != "" {
+		return value
+	}
+	return xaiMetadataString(req.Metadata, key)
+}
+
+func xaiNextGrokTurnIndex(auth *cliproxyauth.Auth, sessionID string) int {
+	if sessionID == "" {
+		return 1
+	}
+	key := sessionID
+	if auth != nil && auth.ID != "" {
+		key = auth.ID + ":" + sessionID
+	}
+	now := time.Now()
+	xaiGrokTurns.Lock()
+	defer xaiGrokTurns.Unlock()
+	for existingKey, state := range xaiGrokTurns.sessions {
+		if now.Sub(state.lastSeen) > xaiGrokTurnStateMaxAge {
+			delete(xaiGrokTurns.sessions, existingKey)
+		}
+	}
+	state := xaiGrokTurns.sessions[key]
+	if state.next <= 0 {
+		state.next = 1
+	}
+	turn := state.next
+	state.next++
+	state.lastSeen = now
+	xaiGrokTurns.sessions[key] = state
+	return turn
+}
+
+func xaiDecodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
+	return decodeResponseBody(body, contentEncoding)
 }
 
 func xaiImageEndpointPath(opts cliproxyexecutor.Options) string {
@@ -1020,10 +1521,17 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
-		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
-			body, _ = sjson.DeleteBytes(body, "reasoning")
-		}
+		body = removeEmptyXAIReasoningConfig(body)
 	}
+	return body
+}
+
+func removeEmptyXAIReasoningConfig(body []byte) []byte {
+	reasoning := gjson.GetBytes(body, "reasoning")
+	if !reasoning.Exists() || !reasoning.IsObject() || len(reasoning.Map()) > 0 {
+		return body
+	}
+	body, _ = sjson.DeleteBytes(body, "reasoning")
 	return body
 }
 
@@ -1348,6 +1856,8 @@ func xaiSupportsReasoningEffort(model string) bool {
 		name = name[idx+1:]
 	}
 	switch {
+	case name == "grok-build-0.1":
+		return true
 	case strings.HasPrefix(name, "grok-3-mini"):
 		return true
 	case strings.HasPrefix(name, "grok-4.20-multi-agent"):

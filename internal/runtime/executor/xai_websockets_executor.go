@@ -407,7 +407,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
 
-	prepared, err := e.prepareResponsesWebsocketRequest(ctx, req, opts)
+	prepared, err := e.prepareResponsesWebsocketRequest(ctx, auth, req, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -854,8 +854,8 @@ func xaiBareWebsocketErrorStatus(payload []byte) int {
 	return http.StatusInternalServerError
 }
 
-func (e *XAIWebsocketsExecutor) prepareResponsesWebsocketRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, error) {
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+func (e *XAIWebsocketsExecutor) prepareResponsesWebsocketRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, error) {
+	prepared, err := e.prepareResponsesRequest(ctx, xaiPublicAPIProfileAuth(auth), req, opts, true)
 	if err != nil {
 		return nil, err
 	}
@@ -863,6 +863,21 @@ func (e *XAIWebsocketsExecutor) prepareResponsesWebsocketRequest(ctx context.Con
 		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
 	}
 	return prepared, nil
+}
+
+func xaiPublicAPIProfileAuth(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
+	if auth == nil {
+		return &cliproxyauth.Auth{
+			Provider:   "xai",
+			Attributes: map[string]string{"xai_profile": xaiauth.ProfilePublicAPI},
+		}
+	}
+	copied := auth.Clone()
+	if copied.Attributes == nil {
+		copied.Attributes = make(map[string]string)
+	}
+	copied.Attributes["xai_profile"] = xaiauth.ProfilePublicAPI
+	return copied
 }
 
 func (e *XAIWebsocketsExecutor) dialXAIWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {

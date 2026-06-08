@@ -50,12 +50,40 @@ func TestBuildAuthorizeURLIncludesXAIRequiredParameters(t *testing.T) {
 		"state":                 "state-123",
 		"nonce":                 "nonce-123",
 		"plan":                  "generic",
-		"referrer":              "cli-proxy-api",
+		"referrer":              ProfileGrokBuild,
 	}
 	for key, value := range want {
 		if got := query.Get(key); got != value {
 			t.Fatalf("%s = %q, want %q", key, got, value)
 		}
+	}
+}
+
+func TestCreateTokenStorageUsesGrokBuildDefaults(t *testing.T) {
+	auth := NewXAIAuth(nil)
+	storage := auth.CreateTokenStorage(&AuthBundle{
+		TokenData: TokenData{
+			AccessToken:  "access",
+			RefreshToken: "refresh",
+		},
+		LastRefresh:   "2026-06-08T00:00:00Z",
+		RedirectURI:   "http://127.0.0.1:56121/callback",
+		TokenEndpoint: "https://auth.x.ai/oauth/token",
+	})
+	if storage == nil {
+		t.Fatal("CreateTokenStorage() = nil")
+	}
+	if storage.BaseURL != GrokBuildAPIBaseURL {
+		t.Fatalf("BaseURL = %q, want %q", storage.BaseURL, GrokBuildAPIBaseURL)
+	}
+	if storage.XAIProfile != ProfileGrokBuild {
+		t.Fatalf("XAIProfile = %q, want %q", storage.XAIProfile, ProfileGrokBuild)
+	}
+	if storage.XAIGrokClientVersion != GrokBuildClientVersion {
+		t.Fatalf("XAIGrokClientVersion = %q, want %q", storage.XAIGrokClientVersion, GrokBuildClientVersion)
+	}
+	if storage.XAIGrokAgentID == "" {
+		t.Fatal("XAIGrokAgentID is empty")
 	}
 }
 

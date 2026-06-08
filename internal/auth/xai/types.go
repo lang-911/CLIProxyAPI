@@ -6,6 +6,14 @@ import "time"
 const (
 	// DefaultAPIBaseURL is the default xAI Responses API base URL.
 	DefaultAPIBaseURL = "https://api.x.ai/v1"
+	// GrokBuildAPIBaseURL is the Grok Build CLI chat proxy base URL.
+	GrokBuildAPIBaseURL = "https://cli-chat-proxy.grok.com/v1"
+	// ProfileGrokBuild selects the Grok Build CLI-compatible text profile.
+	ProfileGrokBuild = "grok-build"
+	// ProfilePublicAPI selects the public xAI API-compatible text profile.
+	ProfilePublicAPI = "public-api"
+	// GrokBuildClientVersion is the default Grok Build client version header.
+	GrokBuildClientVersion = "0.2.33"
 	// Issuer is xAI's OAuth issuer.
 	Issuer = "https://auth.x.ai"
 	// DiscoveryURL is the OIDC discovery endpoint used to resolve OAuth endpoints.
@@ -64,9 +72,12 @@ type TokenData struct {
 
 // AuthBundle aggregates token data and OAuth metadata for persistence.
 type AuthBundle struct {
-	TokenData     TokenData
-	LastRefresh   string
-	BaseURL       string
-	RedirectURI   string
-	TokenEndpoint string
+	TokenData            TokenData
+	LastRefresh          string
+	BaseURL              string
+	RedirectURI          string
+	TokenEndpoint        string
+	XAIProfile           string
+	XAIGrokClientVersion string
+	XAIGrokAgentID       string
 }

@@ -2277,7 +2277,7 @@ func resolveClaudeSessionIDFromHeaders(ctx context.Context, headers http.Header,
 			return sessionID, nil
 		}
 		if resolved := helps.OpenCodeStableSessionUUID(headers); resolved != "" {
-			return resolved
+			return resolved, nil
 		}
 	}
 	return helps.CachedSessionIDRequired(ctx, apiKey)

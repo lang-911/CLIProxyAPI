@@ -2409,6 +2409,10 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			"redirect_uri":   tokenStorage.RedirectURI,
 			"token_endpoint": tokenStorage.TokenEndpoint,
 			"auth_kind":      "oauth",
+			"xai_profile":    tokenStorage.XAIProfile,
+
+			"xai_grok_client_version": tokenStorage.XAIGrokClientVersion,
+			"xai_grok_agent_id":       tokenStorage.XAIGrokAgentID,
 		}
 		if tokenStorage.Email != "" {
 			metadata["email"] = tokenStorage.Email
@@ -2425,8 +2429,11 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 			Attributes: map[string]string{
-				"auth_kind": "oauth",
-				"base_url":  tokenStorage.BaseURL,
+				"auth_kind":               "oauth",
+				"base_url":                tokenStorage.BaseURL,
+				"xai_profile":             tokenStorage.XAIProfile,
+				"xai_grok_client_version": tokenStorage.XAIGrokClientVersion,
+				"xai_grok_agent_id":       tokenStorage.XAIGrokAgentID,
 			},
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)

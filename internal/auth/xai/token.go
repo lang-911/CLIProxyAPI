@@ -28,6 +28,10 @@ type TokenStorage struct {
 	RedirectURI   string `json:"redirect_uri,omitempty"`
 	TokenEndpoint string `json:"token_endpoint,omitempty"`
 	AuthKind      string `json:"auth_kind,omitempty"`
+	XAIProfile    string `json:"xai_profile,omitempty"`
+
+	XAIGrokClientVersion string `json:"xai_grok_client_version,omitempty"`
+	XAIGrokAgentID       string `json:"xai_grok_agent_id,omitempty"`
 
 	Metadata map[string]any `json:"-"`
 }
