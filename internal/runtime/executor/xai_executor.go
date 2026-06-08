@@ -886,10 +886,19 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, auth *clipr
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
 
+	supportsReasoningEffort := xaiSupportsReasoningEffort(baseModel)
+	requestedReasoningEffort := ""
+	if supportsReasoningEffort {
+		requestedReasoningEffort = thinking.ExtractReasoningEffort(body, e.Identifier(), req.Model)
+	}
+
 	var err error
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
 	if err != nil {
 		return nil, err
+	}
+	if supportsReasoningEffort && requestedReasoningEffort != "" {
+		body, _ = sjson.SetBytes(body, "reasoning.effort", requestedReasoningEffort)
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -948,24 +957,7 @@ func (e *XAIExecutor) prepareGrokBuildResponsesRequest(req cliproxyexecutor.Requ
 	body, _ = sjson.SetBytes(body, "store", false)
 	body, _ = sjson.SetBytes(body, "include", []string{"reasoning.encrypted_content"})
 	body, _ = sjson.SetBytes(body, "reasoning.summary", "concise")
-	supportsReasoningEffort := xaiSupportsReasoningEffort(baseModel)
-	requestedReasoningEffort := ""
-	if supportsReasoningEffort {
-		requestedReasoningEffort = thinking.ExtractReasoningEffort(body, e.Identifier(), req.Model)
-	}
-	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
-	if err != nil {
-		return nil, err
-	}
-	if supportsReasoningEffort {
-		if requestedReasoningEffort != "" {
-			body, _ = sjson.SetBytes(body, "reasoning.effort", requestedReasoningEffort)
-		}
-	} else {
-		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
-		body = removeEmptyXAIReasoningConfig(body)
-	}
+	body, _ = sjson.DeleteBytes(body, "reasoning.effort")
 	body = normalizeXAITools(body)
 	body = normalizeXAIGrokBuildToolChoice(body)
 	body = normalizeXAIInputReasoningItems(body)

@@ -843,7 +843,7 @@ func TestXAIExecutorGrokBuildPreservesDistinctTextModels(t *testing.T) {
 	}
 }
 
-func TestXAIExecutorGrokBuildPreservesReasoningEffortForBuildModel(t *testing.T) {
+func TestXAIExecutorGrokBuildStripsReasoningEffortForBuildModel(t *testing.T) {
 	var gotBody []byte
 	var gotOverride string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -882,8 +882,47 @@ func TestXAIExecutorGrokBuildPreservesReasoningEffortForBuildModel(t *testing.T)
 	if got := gjson.GetBytes(gotBody, "reasoning.summary").String(); got != "concise" {
 		t.Fatalf("reasoning.summary = %q, want concise; body=%s", got, string(gotBody))
 	}
+	if gjson.GetBytes(gotBody, "reasoning.effort").Exists() {
+		t.Fatalf("reasoning.effort exists, want omitted for grok-build-0.1; body=%s", string(gotBody))
+	}
+}
+
+func TestXAIExecutorPublicAPIPreservesReasoningEffortForBuildModel(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-build-0.1\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":    server.URL,
+			"xai_profile": xaiauth.ProfilePublicAPI,
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-build-0.1(high)",
+		Payload: []byte(`{"model":"grok-build-0.1","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "grok-build-0.1" {
+		t.Fatalf("model = %q, want grok-build-0.1; body=%s", got, string(gotBody))
+	}
 	if got := gjson.GetBytes(gotBody, "reasoning.effort").String(); got != "high" {
-		t.Fatalf("reasoning.effort = %q, want high; body=%s", got, string(gotBody))
+		t.Fatalf("reasoning.effort = %q, want high for public-api profile; body=%s", got, string(gotBody))
 	}
 }
 
