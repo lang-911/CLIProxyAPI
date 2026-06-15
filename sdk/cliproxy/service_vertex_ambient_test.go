@@ -137,11 +137,8 @@ func TestHandleAuthUpdateExplicitVertexSuppressesAndDeleteRecreatesAmbient(t *te
 	})
 
 	ambient, ok = service.coreManager.GetByID(ambientVertexAuthID)
-	if !ok || ambient == nil {
-		t.Fatal("expected ambient auth record to remain addressable after suppression")
-	}
-	if !ambient.Disabled {
-		t.Fatal("expected ambient auth to be disabled when explicit vertex auth is present")
+	if ok && ambient != nil {
+		t.Fatal("expected ambient auth record to be removed when explicit vertex auth is present")
 	}
 
 	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
@@ -242,7 +239,7 @@ func TestRegisterModelsForAmbientVertexAuthUsesOAuthAliasesAndExclusions(t *test
 		registry.UnregisterClient(auth.ID)
 	})
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 
 	models := registry.GetAvailableModelsByProvider("vertex")
 	if len(models) == 0 {

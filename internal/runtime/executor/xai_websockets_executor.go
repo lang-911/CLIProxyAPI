@@ -859,6 +859,16 @@ func (e *XAIWebsocketsExecutor) prepareResponsesWebsocketRequest(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
+	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
+		prepared.body, _ = sjson.SetBytes(prepared.body, "prompt_cache_key", sessionID)
+	}
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	if generate := gjson.GetBytes(originalPayload, "generate"); generate.Exists() {
+		prepared.body, _ = sjson.SetRawBytes(prepared.body, "generate", []byte(generate.Raw))
+	}
 	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
 		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
 	}

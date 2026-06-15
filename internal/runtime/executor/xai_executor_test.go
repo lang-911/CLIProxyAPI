@@ -1531,18 +1531,19 @@ func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		Provider: "xai",
-		Metadata: map[string]any{"access_token": "xai-token"},
+		Provider:   "xai",
+		Attributes: map[string]string{"xai_profile": xaiauth.ProfilePublicAPI},
+		Metadata:   map[string]any{"access_token": "xai-token"},
 	}
 	payload := []byte(`{"model":"grok-composer-2.5-fast","metadata":{"user_id":"{\"session_id\":\"cache-session-1\"}"},"input":"hello"}`)
 	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true}
 
-	first, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	first, err := exec.prepareResponsesRequest(context.Background(), auth, req, opts, true)
 	if err != nil {
 		t.Fatalf("prepareResponsesRequest first error: %v", err)
 	}
-	second, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	second, err := exec.prepareResponsesRequest(context.Background(), auth, req, opts, true)
 	if err != nil {
 		t.Fatalf("prepareResponsesRequest second error: %v", err)
 	}
@@ -1600,7 +1601,7 @@ func TestXAIExecutorReMergesReasoningAfterDroppingInvalidEncryptedContent(t *tes
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
 		Provider:   "xai",
-		Attributes: map[string]string{"base_url": server.URL},
+		Attributes: map[string]string{"base_url": server.URL, "xai_profile": xaiauth.ProfilePublicAPI},
 		Metadata:   map[string]any{"access_token": "xai-token"},
 	}
 
@@ -1648,7 +1649,7 @@ func TestXAIExecutorDropsInvalidCompactionItem(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
 		Provider:   "xai",
-		Attributes: map[string]string{"base_url": server.URL},
+		Attributes: map[string]string{"base_url": server.URL, "xai_profile": xaiauth.ProfilePublicAPI},
 		Metadata:   map[string]any{"access_token": "xai-token"},
 	}
 
@@ -1699,8 +1700,9 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 		ID:       "xai-auth-replay-1",
 		Provider: "xai",
 		Attributes: map[string]string{
-			"base_url":  server.URL,
-			"auth_kind": "oauth",
+			"base_url":    server.URL,
+			"auth_kind":   "oauth",
+			"xai_profile": xaiauth.ProfilePublicAPI,
 		},
 		Metadata: map[string]any{
 			"access_token": "xai-token",
@@ -1798,8 +1800,9 @@ func TestXAIExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t
 		ID:       "xai-auth-replay-tool",
 		Provider: "xai",
 		Attributes: map[string]string{
-			"base_url":  server.URL,
-			"auth_kind": "oauth",
+			"base_url":    server.URL,
+			"auth_kind":   "oauth",
+			"xai_profile": xaiauth.ProfilePublicAPI,
 		},
 		Metadata: map[string]any{
 			"access_token": "xai-token",

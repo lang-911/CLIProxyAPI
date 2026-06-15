@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -65,7 +66,7 @@ func TestRegisterModelsForAuth_CodexPlanTypeAttributeSelectsTier(t *testing.T) {
 				},
 			}
 
-			service.registerModelsForAuth(auth)
+			service.registerModelsForAuth(context.Background(), auth)
 
 			assertModelSetEqual(t, reg.GetModelsForClient(authID), tt.want)
 		})
